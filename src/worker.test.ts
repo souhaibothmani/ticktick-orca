@@ -51,7 +51,7 @@ function fakeTickTick(options: { inboxStatus?: number; projectStatus?: number; s
       const ids = (body as { projectIds: string[] }).projectIds
       return json([
         { id: 'd1', projectId: ids[0], title: 'Older', status: 2, completedTime: '2026-11-01T10:00:00.000+0000' },
-        { id: 'd2', projectId: ids[0], title: 'Newer', status: 2, completedTime: '2026-11-20T10:00:00.000+0000' }
+        { id: 'd2', projectId: ids[0], title: 'Newer', content: 'a very long prompt', status: 2, completedTime: '2026-11-20T10:00:00.000+0000' }
       ])
     }
     const one = /^\/project\/([^/]+)\/task\/([^/]+)$/.exec(url)
@@ -103,7 +103,7 @@ test('connects, loads open tasks, and keeps the token out of plain storage when 
 
   const data = await worker.request('data.load', {})
   assert.deepEqual(data.projects, [{ id: 'p1', name: 'Finikos', color: '#FFAC38' }])
-  assert.deepEqual(data.tasks.map((t) => t.id).sort(), ['t1', 't2'])
+  assert.deepEqual(data.tasks.map((t) => t.id), ['t1'])
   // Second load inside the cache window: no new call to TickTick.
   const before = api.calls.length
   await worker.request('data.load', {})
@@ -189,20 +189,13 @@ test('an empty title is refused before calling TickTick', async () => {
   await worker.deactivate()
 })
 
-test('a rate limit on the Inbox fails the load instead of hiding Inbox tasks', async () => {
-  const api = fakeTickTick({ inboxStatus: 429 })
-  restore = api.restore
-  const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
-  await assert.rejects(worker.request('data.load', {}), /100 calls a minute/)
-  await worker.deactivate()
-})
-
-test('a missing Inbox still loads the other lists', async () => {
-  const api = fakeTickTick({ inboxStatus: 404 })
+test('the Inbox is not read: the panel does not show it', async () => {
+  const api = fakeTickTick()
   restore = api.restore
   const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
   const data = await worker.request('data.load', {})
   assert.deepEqual(data.tasks.map((t) => t.id), ['t1'])
+  assert.deepEqual(api.calls.map((c) => c.url), ['/project', '/project/p1/data'])
   await worker.deactivate()
 })
 
@@ -267,6 +260,7 @@ test('completed tasks of one list: one call, newest first, last 30 days', async 
   const { tasks } = await worker.request('tasks.completed', { projectId: 'p1' })
   assert.deepEqual(tasks.map((t) => t.id), ['d2', 'd1'])
   assert.equal(tasks[0].completedTime, '2026-11-20T10:00:00.000+0000')
+  assert.equal(tasks[0].content, '', 'descriptions stay out of the answer')
   assert.equal(api.calls.length, 1)
   const body = api.calls[0].body as { projectIds: string[]; startDate: string; endDate: string }
   assert.deepEqual(body.projectIds, ['p1'])

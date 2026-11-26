@@ -351,3 +351,39 @@ test('a list that no longer exists shows a way back', async () => {
   assert.ok(view.find({ label: '🧡Finikos' }))
   await view.unmount()
 })
+
+test('Completed offers Retry when it fails, and no Untick on a repeating task', async () => {
+  let fail = true
+  const repeating = task('t5', 'p1', 'Weekly report', { status: 2, repeatFlag: 'RRULE:FREQ=WEEKLY', completedTime: '2026-11-20T10:00:00.000+0000' })
+  const host = mockHost({
+    requests: {
+      ...connected,
+      'data.load': () => fixture(),
+      'tasks.completed': () => {
+        if (fail) throw Object.assign(new Error('TickTick allows 100 calls a minute.'), { code: 'rate_limited' })
+        return { tasks: [repeating] }
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ label: '🧡Finikos' })
+  await view.toggle({ type: 'Collapsible' })
+  assert.ok(view.find({ text: 'Could not load completed tasks.' }))
+  fail = false
+  await view.press({ text: 'Retry' })
+  assert.ok(view.find({ type: 'Collapsible', label: 'Completed · 1' }))
+  assert.equal(view.find({ label: 'Untick Weekly report' })?.disabled, true)
+  await view.unmount()
+})
+
+test('Back from a task drops a pending Complete confirmation', async () => {
+  const view = await mount(panel, { host: mockHost({ requests: { ...connected, 'data.load': () => fixture() } }) })
+  await view.press({ label: '🧡Finikos' })
+  await view.press({ type: 'ListItem', label: 'ISTAT' })
+  await view.press({ type: 'Button', text: 'Complete' })
+  assert.ok(view.find({ type: 'Callout', label: 'Complete this task?' }))
+  await view.press({ text: '← 🧡Finikos' })
+  assert.equal(view.find({ text: 'Complete “ISTAT”?' }), null)
+  assert.ok(view.find({ type: 'ListItem', label: 'ISTAT' }))
+  await view.unmount()
+})

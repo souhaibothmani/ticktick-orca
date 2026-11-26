@@ -53,6 +53,7 @@ const confirmTick = atom<string | null>(null)
 /** Completed tasks of the open list, loaded when its section opens; null = not loaded. */
 const done = atom<{ list: string; tasks: TickTask[] } | null>(null)
 const doneOpen = atom(false)
+const doneFailed = atom(false)
 /** Detail screen: edit form open, and its values. */
 const editing = atom(false)
 const draft = atom<Draft | null>(null)
@@ -233,6 +234,7 @@ function openList(list: string): void {
   set(confirmTick, null)
   set(done, null)
   set(doneOpen, false)
+  set(doneFailed, false)
   set(newTitle, '')
   set(nav, { screen: 'tasks', list })
 }
@@ -279,8 +281,10 @@ async function reopen(task: TickTask): Promise<void> {
 }
 
 async function loadDone(list: string): Promise<void> {
+  set(doneFailed, false)
   const answer = await run(() => plugin.request('tasks.completed', { projectId: list }))
   if (answer) set(done, { list, tasks: answer.tasks })
+  else set(doneFailed, true)
 }
 
 function openTask(list: string, task: TickTask): void {
@@ -365,7 +369,8 @@ export function setup(ctx: PanelContext): void {
 function Page({ children, footer }: { children?: OrcaNode; footer?: OrcaNode }) {
   return (
     <Box direction="column" height="100%" gap="md">
-      <Box grow scroll="y" gap="md">
+      {/* minHeight 0 lets the grown column scroll instead of pushing the footer out of view. */}
+      <Box grow minHeight={0} scroll="y" gap="md">
         {children}
       </Box>
       {footer ? (
@@ -537,7 +542,10 @@ function TaskRow({ list, task }: { list: string; task: TickTask }) {
   )
 }
 
-/** A completed task: the filled tick unticks it. */
+/**
+ * A completed task: the filled tick unticks it. Not for a repeating task: its next occurrence
+ * is already open, so unticking an old one would make a second copy.
+ */
 function DoneRow({ task }: { task: TickTask }) {
   const at = parseDue(task.completedTime)
   return (
@@ -545,11 +553,11 @@ function DoneRow({ task }: { task: TickTask }) {
       <IconButton
         icon="check"
         label={`Untick ${task.title}`}
-        tooltip="Mark as not done"
+        tooltip={task.repeatFlag ? 'Repeating task: its next date is already open' : 'Mark as not done'}
         variant="solid"
         tone="success"
         size="sm"
-        disabled={read(busy)}
+        disabled={read(busy) || task.repeatFlag !== null}
         onPress={() => reopen(task)}
       />
       <Box grow minWidth={0}>
@@ -579,7 +587,16 @@ function CompletedSection({ list }: { list: string }) {
         if (open && !loaded) void loadDone(list)
       }}
     >
-      {loaded === null ? (
+      {loaded === null && read(doneFailed) ? (
+        <Row gap="sm" align="center">
+          <Text size="sm" muted>
+            Could not load completed tasks.
+          </Text>
+          <Button size="xs" variant="ghost" icon="refresh" disabled={read(busy)} onPress={() => loadDone(list)}>
+            Retry
+          </Button>
+        </Row>
+      ) : loaded === null ? (
         <Skeleton lines={3} label="Loading completed tasks" />
       ) : loaded.length === 0 ? (
         <Text size="sm" muted>
@@ -779,6 +796,8 @@ function TaskScreen({ list }: { list: string }) {
   const d = read(data)
   const back = () => {
     set(editing, false)
+    set(confirmTick, null)
+    set(deleteArmed, false)
     set(nav, { screen: 'tasks', list })
   }
   if (!task) {

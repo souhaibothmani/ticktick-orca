@@ -108,17 +108,8 @@ async function loadAll(token: string): Promise<TickData> {
   const projects: TickProject[] = raw
     .filter((p) => !p.closed)
     .map((p) => ({ id: p.id, name: p.name, color: p.color ?? null }))
-  // One call per project plus one for the Inbox, in parallel.
-  const ids = ['inbox', ...projects.map((p) => p.id)]
-  const pages = await Promise.all(
-    ids.map((id) =>
-      call<ProjectData>(token, 'GET', `/project/${id}/data`).catch((error: Fail) => {
-        // Only a missing Inbox means "no Inbox tasks"; a rate limit or an outage must surface.
-        if (id === 'inbox' && error.status !== undefined && error.status >= 400 && error.status < 500 && error.status !== 429) return null
-        throw error
-      })
-    )
-  )
+  // One call per project, in parallel. The panel shows no Inbox, so it is not read.
+  const pages = await Promise.all(projects.map((p) => call<ProjectData>(token, 'GET', `/project/${p.id}/data`)))
   const tasks = pages
     .flatMap((page) => page?.tasks ?? [])
     .map(toTask)
@@ -294,8 +285,9 @@ export default function activate(orca: OrcaWorkerApi): void {
       startDate: stamp(Date.now() - 30 * day),
       endDate: stamp(Date.now() + day)
     })
+    // The section shows title and date only: leave descriptions out, an answer is capped at 1 MiB.
     const tasks = (raw ?? [])
-      .map(toTask)
+      .map((t) => ({ ...toTask(t), content: '' }))
       .filter((t) => t.status !== 0)
       .sort((a, b) => (b.completedTime ?? '').localeCompare(a.completedTime ?? ''))
       .slice(0, 100)
