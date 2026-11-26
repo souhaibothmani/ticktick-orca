@@ -247,3 +247,53 @@ test('a list that no longer exists shows a way back', async () => {
   assert.ok(view.find({ label: 'Today' }))
   await view.unmount()
 })
+
+test('a failing list load does not reload by itself, and a gone task reloads exactly once', async () => {
+  let loads = 0
+  let failLoads = false
+  const host = mockHost({
+    requests: {
+      'auth.status': { connected: true, storedIn: 'keychain' },
+      'data.load': () => {
+        loads += 1
+        if (failLoads) throw Object.assign(new Error('TickTick answered 404: not found.'), { code: 'action_failed' })
+        return fixture()
+      },
+      'task.complete': () => {
+        throw Object.assign(new Error('This task no longer exists in TickTick.'), { code: 'conflict' })
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  assert.equal(loads, 1)
+  await view.press({ label: '🧡Finikos' })
+  failLoads = true
+  await view.toggle({ label: 'ISTAT' })
+  await view.settled()
+  // One reload after the conflict; its own failure does not start another.
+  assert.equal(loads, 2)
+  assert.equal(view.find({ label: 'ISTAT' }), null, 'a gone task is not put back')
+  assert.ok(view.find({ text: 'This task no longer exists in TickTick.' }), 'the conflict message stays visible')
+  await view.unmount()
+})
+
+test('a repeating task whose read-back failed leaves the list without Undo', async () => {
+  const host = mockHost({
+    requests: {
+      'auth.status': { connected: true, storedIn: 'keychain' },
+      'data.load': () => {
+        const d = fixture()
+        d.tasks[0].repeatFlag = 'RRULE:FREQ=DAILY'
+        return d
+      },
+      'task.complete': () => ({ task: null })
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ label: '🧡Finikos' })
+  await view.toggle({ label: 'ISTAT' })
+  assert.equal(view.find({ label: 'ISTAT' }), null)
+  assert.equal(view.find({ text: 'Undo' }), null)
+  assert.deepEqual(view.errors, [])
+  await view.unmount()
+})

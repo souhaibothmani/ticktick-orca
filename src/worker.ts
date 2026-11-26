@@ -69,7 +69,7 @@ async function call<T>(token: string, method: string, path: string, body?: unkno
   }
   if (response.status === 401) throw fail('not_permitted', 'TickTick refused the token (401). Connect again.')
   if (response.status === 429) throw fail('rate_limited', 'TickTick allows 100 calls a minute. Wait a minute, then try again.')
-  if (response.status === 404) throw fail('conflict', 'This task or list no longer exists in TickTick.', 404)
+  if (response.status === 404) throw fail('action_failed', 'TickTick answered 404: not found.', 404)
   if (!response.ok) {
     const text = (await response.text().catch(() => '')).slice(0, 200)
     throw fail('action_failed', `TickTick answered ${response.status}${text ? `: ${text}` : ''}`, response.status)
@@ -165,13 +165,18 @@ export default function activate(orca: OrcaWorkerApi): void {
     orca.panels.post('task.removed', { id })
   }
 
-  /** A task gone in TickTick (completed, moved or deleted elsewhere) leaves the lists too. */
+  /**
+   * A task gone in TickTick (completed, moved or deleted elsewhere) leaves the lists too, and
+   * answers `conflict` so the panel reloads once. Only task calls do this: a 404 while loading
+   * the lists stays `action_failed`, or a list that always 404s would reload without end.
+   */
   async function onTask<T>(id: string, work: () => Promise<T>): Promise<T> {
     try {
       return await work()
     } catch (error) {
-      if ((error as Fail).status === 404) drop(id)
-      throw error
+      if ((error as Fail).status !== 404) throw error
+      drop(id)
+      throw fail('conflict', 'This task no longer exists in TickTick.', 404)
     }
   }
 
@@ -253,9 +258,17 @@ export default function activate(orca: OrcaWorkerApi): void {
       return { task: null }
     }
     // A repeating task keeps its id and moves to its next date (verified live): read it back.
-    const next = toTask(await call<RawTask>(key, 'GET', `/project/${projectId}/task/${id}`))
-    upsert(next)
-    return { task: next }
+    // The complete already landed, so a failed read-back must not surface as an error: the
+    // panel would put the old date back and a second tick would skip an occurrence.
+    try {
+      const next = toTask(await call<RawTask>(key, 'GET', `/project/${projectId}/task/${id}`))
+      upsert(next)
+      return { task: next }
+    } catch (error) {
+      orca.log(`read-back after complete failed: ${(error as Error).message}`)
+      drop(id)
+      return { task: null }
+    }
   })
 
   orca.panels.handle('task.reopen', async ({ id, projectId }: TaskRef) => {

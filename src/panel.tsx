@@ -165,28 +165,38 @@ function applyRemoved(id: string): void {
   if (d && d.tasks.some((t) => t.id === id)) set(data, { ...d, tasks: d.tasks.filter((t) => t.id !== id) })
 }
 
-/** Runs a worker call with the spinner and error bar; a refused token sends you to Connect. */
-async function run<T>(work: () => Promise<T>): Promise<T | undefined> {
+/** Code of the last failed call, for callers that react to the kind of failure. */
+let lastCode: string | undefined
+
+/**
+ * Runs a worker call with the spinner and error bar; a refused token sends you to Connect.
+ * `quiet` (automatic reloads) keeps the message already shown.
+ */
+async function run<T>(work: () => Promise<T>, quiet = false): Promise<T | undefined> {
   update(pending, (n) => n + 1)
-  set(error, null)
+  if (!quiet) set(error, null)
+  lastCode = undefined
   let stale = false
   try {
     return await work()
   } catch (e) {
     const code = (e as { code?: string }).code
+    lastCode = code
     if (code === 'not_permitted') set(auth, { connected: false, storedIn: null })
     // The task changed in TickTick meanwhile (completed, moved or deleted there): reload once.
+    // Only task calls answer `conflict`, so this reload cannot trigger itself again.
     if (code === 'conflict') stale = true
-    set(error, message(e))
+    if (!quiet || !read(error)) set(error, message(e))
     return undefined
   } finally {
     update(pending, (n) => n - 1)
-    if (stale) void load(true)
+    // Next tick: the caller must read `lastCode` before the reload resets it.
+    if (stale) setTimeout(() => void load(true, true), 0)
   }
 }
 
-async function load(fresh = false): Promise<void> {
-  const answer = await run(() => plugin.request('data.load', { fresh }))
+async function load(fresh = false, quiet = false): Promise<void> {
+  const answer = await run(() => plugin.request('data.load', { fresh }), quiet)
   if (answer) set(data, answer)
 }
 
@@ -228,13 +238,13 @@ async function complete(task: TickTask): Promise<void> {
     : { id: task.id, projectId: task.projectId }
   const answer = await run(() => plugin.request('task.complete', ref))
   if (!answer) {
-    // Put back only this row: anything else that changed meanwhile stays.
-    if (!read(data)?.tasks.some((t) => t.id === task.id)) applyTask(task)
+    // Put back only this row, unless TickTick says the task is gone.
+    if (lastCode !== 'conflict' && !read(data)?.tasks.some((t) => t.id === task.id)) applyTask(task)
     return
   }
   // A repeating task comes back with its next date, and there is nothing to undo.
   if (answer.task) applyTask(answer.task)
-  else set(lastDone, task)
+  else if (!task.repeatFlag) set(lastDone, task)
 }
 
 async function undo(): Promise<void> {
@@ -312,7 +322,7 @@ export function setup(ctx: PanelContext): void {
   // Another panel reloaded: take the worker's cached copy (no call to TickTick).
   ctx.subscriptions.push(
     plugin.on('data.reloaded', ({ loadedAt }) => {
-      if (read(auth)?.connected && read(data)?.loadedAt !== loadedAt) void load()
+      if (read(auth)?.connected && read(data)?.loadedAt !== loadedAt) void load(false, true)
     })
   )
   ctx.subscriptions.push(plugin.on('auth.changed', (payload) => set(auth, payload)))

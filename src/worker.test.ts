@@ -5,7 +5,7 @@ import * as main from './worker'
 type Call = { method: string; url: string; body: unknown }
 
 /** A tiny in-memory TickTick: two projects, an Inbox, and the token "good". */
-function fakeTickTick(options: { inboxStatus?: number } = {}) {
+function fakeTickTick(options: { inboxStatus?: number; projectStatus?: number; singleStatus?: number } = {}) {
   const calls: Call[] = []
   const tasks = [
     { id: 't1', projectId: 'p1', title: 'Write plugin', status: 0, priority: 5, sortOrder: 1 },
@@ -30,6 +30,7 @@ function fakeTickTick(options: { inboxStatus?: number } = {}) {
     if (method === 'GET' && data) {
       const id = data[1]
       if (id === 'inbox' && options.inboxStatus) return new Response('', { status: options.inboxStatus })
+      if (id !== 'inbox' && options.projectStatus) return new Response('', { status: options.projectStatus })
       return json({ tasks: tasks.filter((t) => (id === 'inbox' ? t.projectId.startsWith('inbox') : t.projectId === id)) })
     }
     if (method === 'POST' && url === '/task') {
@@ -48,6 +49,7 @@ function fakeTickTick(options: { inboxStatus?: number } = {}) {
     }
     const one = /^\/project\/([^/]+)\/task\/([^/]+)$/.exec(url)
     if (method === 'GET' && one) {
+      if (options.singleStatus) return new Response('', { status: options.singleStatus })
       const t = tasks.find((x) => x.id === one[2])
       return t ? json(t) : new Response('', { status: 404 })
     }
@@ -217,6 +219,8 @@ test('a task gone in TickTick is dropped from the lists and reported as conflict
   await worker.request('data.load', {})
   api.tasks.splice(0, 1)
   await assert.rejects(worker.request('task.delete', { id: 't1', projectId: 'p1' }), (e: unknown) => (e as { code?: string }).code === 'conflict')
+  // A 404 while loading a list is not a conflict: the panel must not reload on it.
+  api.tasks.length = 0
   assert.deepEqual(worker.posts.at(-1), { event: 'task.removed', payload: { id: 't1' } })
   assert.ok(!(await worker.request('data.load', {})).tasks.some((t) => t.id === 't1'))
   await worker.deactivate()
@@ -228,5 +232,23 @@ test('two loads at once share one reload', async () => {
   const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
   await Promise.all([worker.request('data.load', { fresh: true }), worker.request('data.load', { fresh: true })])
   assert.equal(api.calls.filter((c) => c.url === '/project').length, 1)
+  await worker.deactivate()
+})
+
+test('a list that answers 404 fails the load as action_failed, not conflict', async () => {
+  const api = fakeTickTick({ projectStatus: 404 })
+  restore = api.restore
+  const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
+  await assert.rejects(worker.request('data.load', {}), (e: unknown) => (e as { code?: string }).code === 'action_failed')
+  await worker.deactivate()
+})
+
+test('a repeating task whose read-back fails is still reported as completed', async () => {
+  const api = fakeTickTick({ singleStatus: 429 })
+  restore = api.restore
+  Object.assign(api.tasks[0], { repeatFlag: 'RRULE:FREQ=DAILY;INTERVAL=1' })
+  const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
+  assert.deepEqual(await worker.request('task.complete', { id: 't1', projectId: 'p1', repeats: true }), { task: null })
+  assert.deepEqual(worker.posts.at(-1), { event: 'task.removed', payload: { id: 't1' } })
   await worker.deactivate()
 })

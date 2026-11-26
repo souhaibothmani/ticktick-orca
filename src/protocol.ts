@@ -15,7 +15,8 @@ declare module 'orca' {
     'task.create': { input: TaskDraft; output: { task: TickTask } }
     /** Changes title, content, due date or priority of a task. */
     'task.update': { input: TaskPatch; output: { task: TickTask } }
-    /** `repeats`: read the task back, it stays open with its next date. Answers that task, else null. */
+    /** `repeats`: read the task back, it stays open with its next date. Answers that task, or null
+     *  when it is done (or the read-back failed: the next date shows on the next reload). */
     'task.complete': { input: TaskRef & { repeats?: boolean }; output: { task: TickTask | null } }
     /** Marks a completed task as open again. */
     'task.reopen': { input: TaskRef; output: { task: TickTask } }
