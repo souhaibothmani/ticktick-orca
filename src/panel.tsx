@@ -35,8 +35,14 @@ import type { AuthStatus, TaskDraft, TaskPatch, TickData, TickTask } from './pro
 // ---------- state ----------
 
 type Nav = { screen: 'lists' } | { screen: 'tasks'; list: string } | { screen: 'task'; list: string; taskId: string }
-/** The open task as typed. `due` is YYYY-MM-DD or ''; `customDue` shows the date field. */
-type Draft = { taskId: string; title: string; content: string; due: string; priority: string; customDue: boolean }
+/** The editable fields of a task, as the task page holds them. `due` is YYYY-MM-DD or ''. */
+type Fields = { title: string; content: string; due: string; priority: string }
+/**
+ * The open task as typed, and `base`: TickTick's values when the page last heard of them.
+ * Only fields that differ from `base` are sent, so a change made elsewhere is never overwritten
+ * by a field you did not touch here.
+ */
+type Draft = Fields & { taskId: string; base: Fields; customDue: boolean }
 type SaveState = 'saved' | 'pending' | 'saving' | 'invalid' | 'failed'
 
 const auth = atom<AuthStatus | null>(null)
@@ -161,7 +167,26 @@ function message(e: unknown): string {
 }
 
 /** Applies a task the worker answered or announced: in the lists if open, out if done. */
+function fieldsOf(task: TickTask): Fields {
+  return { title: task.title, content: task.content, due: dueKey(task), priority: String(task.priority) }
+}
+
+/** A field counts as touched when it differs from TickTick's (the title ignoring end spaces, which TickTick trims). */
+function touched(d: Draft, f: keyof Fields): boolean {
+  return f === 'title' ? d.title.trim() !== d.base.title : d[f] !== d.base[f]
+}
+
+const FIELDS: (keyof Fields)[] = ['title', 'content', 'due', 'priority']
+
 function applyTask(task: TickTask): void {
+  // The open task changed (here or elsewhere): fields not touched here follow it.
+  const dr = read(draft)
+  if (dr && dr.taskId === task.id && task.status === 0) {
+    const fresh = fieldsOf(task)
+    const next: Draft = { ...dr, base: fresh }
+    for (const f of FIELDS) if (!touched(dr, f)) next[f] = fresh[f]
+    set(draft, next)
+  }
   const d = read(data)
   if (d) {
     const rest = d.tasks.filter((t) => t.id !== task.id)
@@ -291,82 +316,87 @@ async function loadDone(list: string): Promise<void> {
 function openTask(list: string, task: TickTask): void {
   set(confirmTick, null)
   set(deleteArmed, false)
-  set(draft, {
-    taskId: task.id,
-    title: task.title,
-    content: task.content,
-    due: dueKey(task),
-    priority: String(task.priority),
-    customDue: false
-  })
+  const fields = fieldsOf(task)
+  set(draft, { ...fields, taskId: task.id, base: fields, customDue: false })
   set(saveState, 'saved')
   set(nav, { screen: 'task', list, taskId: task.id })
 }
 
-/** What differs between the draft and TickTick's copy; 'invalid' when it cannot be sent yet. */
-function patchOf(d: Draft, task: TickTask): TaskPatch | 'invalid' | null {
-  if (!d.title.trim()) return 'invalid'
+/**
+ * The fields touched here, ready to send. A field that cannot be sent yet (empty title, date
+ * not finished) is left out on its own, so the other fields still save; `held` says so.
+ */
+function patchOf(d: Draft, task: TickTask): { patch: TaskPatch | null; held: boolean } {
   // Orca refuses a request with an undefined field: add only the fields that changed.
   const patch: TaskPatch = { id: task.id, projectId: task.projectId }
-  if (d.title !== task.title) patch.title = d.title
-  if (d.content !== task.content) patch.content = d.content
-  if (Number(d.priority) !== task.priority) patch.priority = Number(d.priority)
-  if (d.due !== dueKey(task)) {
+  let held = false
+  if (touched(d, 'title')) {
+    if (d.title.trim()) patch.title = d.title
+    else held = true
+  }
+  if (touched(d, 'content')) patch.content = d.content
+  if (touched(d, 'priority')) patch.priority = Number(d.priority)
+  if (touched(d, 'due')) {
     if (d.due.trim() === '') patch.dueDate = null
     else {
       const due = toTickDate(d.due)
-      if (!due) return 'invalid'
-      patch.dueDate = due
-      patch.isAllDay = true
-      patch.timeZone = ZONE
+      if (due) {
+        patch.dueDate = due
+        patch.isAllDay = true
+        patch.timeZone = ZONE
+      } else held = true
     }
   }
-  return Object.keys(patch).length > 2 ? patch : null
+  return { patch: Object.keys(patch).length > 2 ? patch : null, held }
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined
-let saving: Promise<void> | null = null
+/** The save loop in progress; callers that await it wait for the last round. */
+let flushing: Promise<void> | null = null
 /** Typed again while a save was on its way: save once more after it. */
 let saveAgain = false
 
-/** Sends what is typed now. One save at a time, so TickTick gets the edits in order. */
-async function flush(): Promise<void> {
-  clearTimeout(saveTimer)
-  if (saving) {
-    saveAgain = true
-    return saving
-  }
+/** Sends one round of what is typed now; false when it failed. */
+async function saveOnce(): Promise<boolean> {
   const d = read(draft)
   const task = d ? read(data)?.tasks.find((t) => t.id === d.taskId) : undefined
-  if (!d || !task) return
-  const patch = patchOf(d, task)
-  if (patch === 'invalid') return set(saveState, 'invalid')
-  if (patch === null) return set(saveState, 'saved')
+  if (!d || !task) return true
+  const { patch } = patchOf(d, task)
+  if (!patch) return true
   set(saveState, 'saving')
-  let ok = false
-  saving = (async () => {
-    const answer = await run(() => plugin.request('task.update', patch))
-    if (answer) {
-      ok = true
-      applyTask(answer.task)
-    }
-  })()
-  try {
-    await saving
-  } finally {
-    saving = null
-  }
-  if (saveAgain) {
-    saveAgain = false
-    return flush()
-  }
-  if (!ok) return set(saveState, 'failed')
-  const now = read(draft)
-  const fresh = now ? read(data)?.tasks.find((t) => t.id === now.taskId) : undefined
-  set(saveState, now && fresh && patchOf(now, fresh) !== null ? 'pending' : 'saved')
+  const answer = await run(() => plugin.request('task.update', patch))
+  // applyTask moves `base` to what TickTick now has, so the next round sends only newer typing.
+  if (answer) applyTask(answer.task)
+  return answer !== undefined
 }
 
-/** Typing waits for a pause (one call, not one per key); a picked value saves at once. */
+/** Sends what is typed now. One save at a time, so TickTick gets the edits in order. */
+function flush(): Promise<void> {
+  clearTimeout(saveTimer)
+  if (flushing) {
+    saveAgain = true
+    return flushing
+  }
+  flushing = (async () => {
+    let ok = true
+    do {
+      saveAgain = false
+      ok = await saveOnce()
+    } while (saveAgain && ok)
+    const now = read(draft)
+    const task = now ? read(data)?.tasks.find((t) => t.id === now.taskId) : undefined
+    const left = now && task ? patchOf(now, task) : { patch: null, held: false }
+    set(saveState, !ok ? 'failed' : left.held ? 'invalid' : left.patch ? 'pending' : 'saved')
+  })().finally(() => {
+    flushing = null
+  })
+  return flushing
+}
+
+/**
+ * Typing waits for a pause of 2.5 s (one call, not one per key: TickTick allows 100 a minute and
+ * the MCP shares them); a picked value saves at once.
+ */
 function patchDraft(change: Partial<Draft>, now = false): void {
   const d = read(draft)
   if (!d) return
@@ -374,7 +404,7 @@ function patchDraft(change: Partial<Draft>, now = false): void {
   set(saveState, 'pending')
   clearTimeout(saveTimer)
   if (now) void flush()
-  else saveTimer = setTimeout(() => void flush(), 1000)
+  else saveTimer = setTimeout(() => void flush(), 2500)
 }
 
 async function remove(list: string, task: TickTask): Promise<void> {
@@ -722,7 +752,7 @@ const SAVE_TEXT: Record<SaveState, string> = {
   saved: 'Saved',
   pending: 'Editing…',
   saving: 'Saving…',
-  invalid: 'Not saved: a title is needed, and dates are YYYY-MM-DD',
+  invalid: 'Title or date not saved: a title is needed, and dates are YYYY-MM-DD',
   failed: 'Not saved: see the error above'
 }
 

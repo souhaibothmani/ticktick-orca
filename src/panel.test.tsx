@@ -264,11 +264,11 @@ test('quick add, typing on the task saves by itself, and delete asks first', asy
   await view.select({ label: 'Due date' }, 'none')
   assert.deepEqual(sent.at(-1), { name: 'task.update', input: { id: 't2', projectId: 'p1', dueDate: null } })
 
-  // A date that is not a date is held back and said, not sent.
-  const before = sent.length
+  // A date that is not a date is held back and said; the other fields still save.
   await view.select({ label: 'Due date' }, 'custom')
-  await view.type({ label: 'Date' }, '2026-13-40', { submit: true })
-  assert.equal(sent.length, before)
+  await view.type({ label: 'Date' }, '2026-13-40')
+  await view.type({ label: 'Description' }, '!', { submit: true })
+  assert.deepEqual(sent.at(-1), { name: 'task.update', input: { id: 't2', projectId: 'p1', content: 'to **Fabio**!' } })
   assert.ok(view.find({ text: /dates are YYYY-MM-DD/ }))
   await view.type({ label: 'Date' }, '2026-12-01', { replace: true, submit: true })
   const due = (sent.at(-1)?.input as { dueDate: string }).dueDate
@@ -308,7 +308,7 @@ test('typing saves once after a pause, and Back sends what is still waiting', as
   await view.type({ label: 'Description' }, 'b')
   await view.type({ label: 'Description' }, 'c')
   assert.equal(sent.length, 0, 'nothing while typing')
-  await new Promise((resolve) => setTimeout(resolve, 1200))
+  await new Promise((resolve) => setTimeout(resolve, 2700))
   await view.settled()
   assert.deepEqual(sent, [{ id: 't2', projectId: 'p1', content: 'abc' }], 'one call for the three keys')
 
@@ -447,5 +447,66 @@ test('Back from a task drops a pending Complete confirmation', async () => {
   await view.press({ text: '← 🧡Finikos' })
   assert.equal(view.find({ text: 'Complete “ISTAT”?' }), null)
   assert.ok(view.find({ type: 'ListItem', label: 'ISTAT' }))
+  await view.unmount()
+})
+
+test('a change made elsewhere while typing is kept: only the touched field is sent', async () => {
+  const sent: TaskPatch[] = []
+  let data = fixture()
+  const host = mockHost({
+    requests: {
+      ...connected,
+      'data.load': () => data,
+      'task.update': (input: TaskPatch) => {
+        sent.push(input)
+        const t = data.tasks.find((x) => x.id === input.id)!
+        const next = { ...t, ...input } as TickTask
+        data = { ...data, tasks: data.tasks.map((x) => (x.id === input.id ? next : x)) }
+        return { task: next }
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ label: '🧡Finikos' })
+  await view.press({ type: 'ListItem', label: 'ISTAT' })
+  // Another panel (or the phone, after a refresh) sets the priority to Low.
+  const elsewhere = { ...data.tasks[0], priority: 1 }
+  data = { ...data, tasks: [elsewhere, ...data.tasks.slice(1)] }
+  await view.post('task.upserted', { task: elsewhere })
+  assert.equal(view.valueOf({ label: 'Priority' }), '1', 'the page shows it')
+  await view.type({ label: 'Description' }, ' more', { submit: true })
+  assert.deepEqual(sent, [{ id: 't1', projectId: 'p1', content: '## Steps\n- check the **numbers** more' }])
+  await view.unmount()
+})
+
+test('an empty title is held back while the description still saves, and end spaces do not loop', async () => {
+  const sent: TaskPatch[] = []
+  let data = fixture()
+  const host = mockHost({
+    requests: {
+      ...connected,
+      'data.load': () => data,
+      'task.update': (input: TaskPatch) => {
+        sent.push(input)
+        const t = data.tasks.find((x) => x.id === input.id)!
+        // As the worker does: the title comes back trimmed.
+        const next = { ...t, ...input, ...(input.title ? { title: input.title.trim() } : {}) } as TickTask
+        data = { ...data, tasks: data.tasks.map((x) => (x.id === input.id ? next : x)) }
+        return { task: next }
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ label: '🧡Finikos' })
+  await view.press({ type: 'ListItem', label: 'Send invoice' })
+  await view.type({ label: 'Title' }, '', { replace: true })
+  await view.type({ label: 'Description' }, 'kept', { submit: true })
+  assert.deepEqual(sent, [{ id: 't2', projectId: 'p1', content: 'kept' }])
+  assert.ok(view.find({ text: /a title is needed/ }))
+  await view.type({ label: 'Title' }, 'Hello ', { submit: true })
+  assert.deepEqual(sent.at(-1), { id: 't2', projectId: 'p1', title: 'Hello ' })
+  assert.ok(view.find({ text: /· Saved$/ }), 'saved, not stuck on Editing')
+  await view.press({ text: '← 🧡Finikos' })
+  assert.equal(sent.length, 2, 'Back sends nothing more')
   await view.unmount()
 })
