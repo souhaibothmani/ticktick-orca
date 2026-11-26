@@ -56,7 +56,7 @@ if ((await page.evaluate(() => document.activeElement?.getAttribute('aria-label'
 await page.click('[aria-label="Priority"]'); await snap('6-priority')
 await page.click('.menu >> text=High priority'); await page.waitForTimeout(300); await snap('7-after-priority')
 
-console.log('sent', JSON.stringify(await page.evaluate(() => window.__sent)))
+console.log('saves sent:', (await page.evaluate(() => window.__sent || [])).length)
 console.log('errors', JSON.stringify(errors))
 if (errors.length) process.exitCode = 1
 await browser.close()
