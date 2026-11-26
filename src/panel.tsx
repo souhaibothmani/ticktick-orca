@@ -25,6 +25,7 @@ import {
   Stack,
   Text,
   Textarea,
+  update,
   type PanelContext
 } from 'orca'
 import type { AuthStatus, TaskDraft, TaskPatch, TickData, TickTask } from './protocol'
@@ -37,7 +38,9 @@ const auth = atom<AuthStatus | null>(null)
 const data = atom<TickData | null>(null)
 /** Kept across panel runs, so the panel reopens where you left it. */
 const nav = atom<Nav>('nav', { screen: 'lists' }, { persist: 'plugin' })
-const busy = atom(false)
+/** Worker calls in flight; the controls wait while any runs. */
+const pending = atom(0)
+const busy = derived(() => read(pending) > 0)
 const error = atom<string | null>(null)
 const tokenDraft = atom('')
 const newTitle = atom('')
@@ -149,20 +152,36 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
+/** Applies a task the worker answered or announced: in the lists if open, out if done. */
+function applyTask(task: TickTask): void {
+  const d = read(data)
+  if (!d) return
+  const rest = d.tasks.filter((t) => t.id !== task.id)
+  set(data, { ...d, tasks: task.status === 0 ? [...rest, task] : rest })
+}
+
+function applyRemoved(id: string): void {
+  const d = read(data)
+  if (d && d.tasks.some((t) => t.id === id)) set(data, { ...d, tasks: d.tasks.filter((t) => t.id !== id) })
+}
+
 /** Runs a worker call with the spinner and error bar; a refused token sends you to Connect. */
 async function run<T>(work: () => Promise<T>): Promise<T | undefined> {
-  set(busy, true)
+  update(pending, (n) => n + 1)
   set(error, null)
+  let stale = false
   try {
     return await work()
   } catch (e) {
-    if ((e as { code?: string }).code === 'not_permitted') {
-      set(auth, { connected: false, storedIn: null })
-    }
+    const code = (e as { code?: string }).code
+    if (code === 'not_permitted') set(auth, { connected: false, storedIn: null })
+    // The task changed in TickTick meanwhile (completed, moved or deleted there): reload once.
+    if (code === 'conflict') stale = true
     set(error, message(e))
     return undefined
   } finally {
-    set(busy, false)
+    update(pending, (n) => n - 1)
+    if (stale) void load(true)
   }
 }
 
@@ -196,23 +215,34 @@ async function addTask(list: string, title: string): Promise<boolean> {
   const due = target.due ? toTickDate(target.due) : null
   if (due) Object.assign(input, { dueDate: due, isAllDay: true, timeZone: ZONE })
   const answer = await run(() => plugin.request('task.create', input))
+  if (answer) applyTask(answer.task)
   return answer !== undefined
 }
 
 async function complete(task: TickTask): Promise<void> {
-  // Optimistic: the row goes away now; the worker's refresh confirms it.
-  const before = read(data)
-  if (before) set(data, { ...before, tasks: before.tasks.filter((t) => t.id !== task.id) })
-  const answer = await run(() => plugin.request('task.complete', { id: task.id, projectId: task.projectId }))
-  if (answer) set(lastDone, task)
-  else if (before) set(data, before)
+  // Optimistic: the row goes away now.
+  applyRemoved(task.id)
+  set(lastDone, null)
+  const ref = task.repeatFlag
+    ? { id: task.id, projectId: task.projectId, repeats: true }
+    : { id: task.id, projectId: task.projectId }
+  const answer = await run(() => plugin.request('task.complete', ref))
+  if (!answer) {
+    // Put back only this row: anything else that changed meanwhile stays.
+    if (!read(data)?.tasks.some((t) => t.id === task.id)) applyTask(task)
+    return
+  }
+  // A repeating task comes back with its next date, and there is nothing to undo.
+  if (answer.task) applyTask(answer.task)
+  else set(lastDone, task)
 }
 
 async function undo(): Promise<void> {
   const task = read(lastDone)
   if (!task) return
   set(lastDone, null)
-  await run(() => plugin.request('task.reopen', { id: task.id, projectId: task.projectId }))
+  const answer = await run(() => plugin.request('task.reopen', { id: task.id, projectId: task.projectId }))
+  if (answer) applyTask(answer.task)
 }
 
 function openTask(list: string, task: TickTask): void {
@@ -251,7 +281,8 @@ async function save(task: TickTask): Promise<void> {
     }
   }
   if (Object.keys(patch).length === 2) return
-  await run(() => plugin.request('task.update', patch))
+  const answer = await run(() => plugin.request('task.update', patch))
+  if (answer) applyTask(answer.task)
 }
 
 async function remove(list: string, task: TickTask): Promise<void> {
@@ -260,7 +291,9 @@ async function remove(list: string, task: TickTask): Promise<void> {
     return
   }
   const answer = await run(() => plugin.request('task.delete', { id: task.id, projectId: task.projectId }))
-  if (answer) set(nav, { screen: 'tasks', list })
+  if (!answer) return
+  applyRemoved(task.id)
+  set(nav, { screen: 'tasks', list })
 }
 
 function patchDraft(change: Partial<{ title: string; content: string; due: string; priority: string }>): void {
@@ -274,7 +307,14 @@ export function setup(ctx: PanelContext): void {
   // The detail edits are not persisted: reopen on the task's list, not on an empty detail.
   const start = read(nav)
   if (start.screen === 'task') set(nav, { screen: 'tasks', list: start.list })
-  ctx.subscriptions.push(plugin.on('data.changed', (payload) => set(data, payload)))
+  ctx.subscriptions.push(plugin.on('task.upserted', ({ task }) => applyTask(task)))
+  ctx.subscriptions.push(plugin.on('task.removed', ({ id }) => applyRemoved(id)))
+  // Another panel reloaded: take the worker's cached copy (no call to TickTick).
+  ctx.subscriptions.push(
+    plugin.on('data.reloaded', ({ loadedAt }) => {
+      if (read(auth)?.connected && read(data)?.loadedAt !== loadedAt) void load()
+    })
+  )
   ctx.subscriptions.push(plugin.on('auth.changed', (payload) => set(auth, payload)))
   void run(() => plugin.request('auth.status')).then((answer) => {
     if (!answer) return
@@ -308,7 +348,7 @@ function ConnectScreen() {
       <Heading>Connect TickTick</Heading>
       <Text size="sm" muted>
         Paste a TickTick Open API access token. The plugin checks it with TickTick, then keeps it in
-        your keychain.
+        your keychain (or in Orca's plugin storage when this machine has no keychain).
       </Text>
       <Input
         label="Access token"
@@ -417,6 +457,18 @@ function TasksScreen({ list }: { list: string }) {
   const d = read(data)
   const tasks = tasksOf(list, d?.tasks ?? [])
   const done = read(lastDone)
+  if (d && !SMART.some((x) => x.id === list) && !d.projects.some((p) => p.id === list)) {
+    return (
+      <Stack gap="md">
+        <Row>
+          <Button size="sm" variant="ghost" onPress={() => set(nav, { screen: 'lists' })}>
+            ← Lists
+          </Button>
+        </Row>
+        <EmptyState icon="info" title="This list no longer exists" description="It was closed or deleted in TickTick." />
+      </Stack>
+    )
+  }
   return (
     <Stack gap="md">
       <Row justify="between" align="center">

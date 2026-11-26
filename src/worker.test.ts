@@ -5,7 +5,7 @@ import * as main from './worker'
 type Call = { method: string; url: string; body: unknown }
 
 /** A tiny in-memory TickTick: two projects, an Inbox, and the token "good". */
-function fakeTickTick() {
+function fakeTickTick(options: { inboxStatus?: number } = {}) {
   const calls: Call[] = []
   const tasks = [
     { id: 't1', projectId: 'p1', title: 'Write plugin', status: 0, priority: 5, sortOrder: 1 },
@@ -29,6 +29,7 @@ function fakeTickTick() {
     const data = /^\/project\/([^/]+)\/data$/.exec(url)
     if (method === 'GET' && data) {
       const id = data[1]
+      if (id === 'inbox' && options.inboxStatus) return new Response('', { status: options.inboxStatus })
       return json({ tasks: tasks.filter((t) => (id === 'inbox' ? t.projectId.startsWith('inbox') : t.projectId === id)) })
     }
     if (method === 'POST' && url === '/task') {
@@ -39,11 +40,20 @@ function fakeTickTick() {
     const done = /^\/project\/([^/]+)\/task\/([^/]+)\/complete$/.exec(url)
     if (method === 'POST' && done) {
       const t = tasks.find((x) => x.id === done[2])
-      if (t) t.status = 2
+      if (!t) return new Response('', { status: 404 })
+      // As TickTick does: a repeating task keeps its id, stays open, moves to its next date.
+      if ((t as { repeatFlag?: string }).repeatFlag) Object.assign(t, { dueDate: '2026-11-28T23:00:00.000+0000' })
+      else t.status = 2
       return new Response('', { status: 200 })
+    }
+    const one = /^\/project\/([^/]+)\/task\/([^/]+)$/.exec(url)
+    if (method === 'GET' && one) {
+      const t = tasks.find((x) => x.id === one[2])
+      return t ? json(t) : new Response('', { status: 404 })
     }
     const del = /^\/project\/([^/]+)\/task\/([^/]+)$/.exec(url)
     if (method === 'DELETE' && del) {
+      if (!tasks.some((x) => x.id === del[2])) return new Response('', { status: 404 })
       tasks.splice(tasks.findIndex((x) => x.id === del[2]), 1)
       return new Response('', { status: 200 })
     }
@@ -138,21 +148,24 @@ test('create, update, complete, reopen and delete hit the right endpoints and re
   const update = api.calls.find((c) => c.url === '/task/t1')
   assert.deepEqual(update?.body, { id: 't1', projectId: 'p1', title: 'Renamed', priority: 3, dueDate: null, startDate: null })
 
-  await worker.request('task.complete', { id: 't1', projectId: 'p1' })
-  const afterDone = worker.posts.at(-1)?.payload as { tasks: { id: string }[] }
-  assert.ok(!afterDone.tasks.some((t) => t.id === 't1'), 'completed task leaves the list')
+  assert.deepEqual(await worker.request('task.complete', { id: 't1', projectId: 'p1' }), { task: null })
+  assert.deepEqual(worker.posts.at(-1), { event: 'task.removed', payload: { id: 't1' } })
 
-  await worker.request('task.reopen', { id: 't1', projectId: 'p1' })
-  const afterReopen = worker.posts.at(-1)?.payload as { tasks: { id: string }[] }
-  assert.ok(afterReopen.tasks.some((t) => t.id === 't1'), 'reopened task comes back')
+  const reopened = await worker.request('task.reopen', { id: 't1', projectId: 'p1' })
+  assert.equal(reopened.task.status, 0)
+  assert.equal(worker.posts.at(-1)?.event, 'task.upserted')
 
   await worker.request('task.delete', { id: 't2', projectId: 'inbox42' })
   assert.ok(api.calls.some((c) => c.method === 'DELETE' && c.url === '/project/inbox42/task/t2'))
-  assert.ok(worker.posts.every((p) => p.event === 'data.changed'))
   // Six changes, six calls: no full reload after each one (TickTick allows 100 calls a minute).
   assert.equal(api.calls.length - loadCalls, 6)
-  const last = worker.posts.at(-1)?.payload as { tasks: { id: string; title: string }[] }
-  assert.deepEqual(last.tasks.map((t) => t.id).sort(), ['t1', 't3', 't4'])
+  // Small events only: a post is capped at 256 KiB, so the full lists never travel as an event.
+  assert.deepEqual(
+    worker.posts.map((p) => p.event),
+    ['data.reloaded', 'task.upserted', 'task.upserted', 'task.upserted', 'task.removed', 'task.upserted', 'task.removed']
+  )
+  const cached = await worker.request('data.load', {})
+  assert.deepEqual(cached.tasks.map((t) => t.id).sort(), ['t1', 't3', 't4'])
   assert.deepEqual(worker.refusals, [])
   await worker.deactivate()
 })
@@ -164,5 +177,56 @@ test('an empty title is refused before calling TickTick', async () => {
   await assert.rejects(worker.request('task.create', { title: '   ' }), /needs a title/)
   await assert.rejects(worker.request('task.update', { id: 't1', projectId: 'p1', title: ' ' }), /needs a title/)
   assert.equal(api.calls.length, 0)
+  await worker.deactivate()
+})
+
+test('a rate limit on the Inbox fails the load instead of hiding Inbox tasks', async () => {
+  const api = fakeTickTick({ inboxStatus: 429 })
+  restore = api.restore
+  const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
+  await assert.rejects(worker.request('data.load', {}), /100 calls a minute/)
+  await worker.deactivate()
+})
+
+test('a missing Inbox still loads the other lists', async () => {
+  const api = fakeTickTick({ inboxStatus: 404 })
+  restore = api.restore
+  const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
+  const data = await worker.request('data.load', {})
+  assert.deepEqual(data.tasks.map((t) => t.id), ['t1'])
+  await worker.deactivate()
+})
+
+test('a repeating task is read back after complete and stays open with its next date', async () => {
+  const api = fakeTickTick()
+  restore = api.restore
+  Object.assign(api.tasks[0], { repeatFlag: 'RRULE:FREQ=DAILY;INTERVAL=1', dueDate: '2026-11-27T23:00:00.000+0000' })
+  const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
+  const answer = await worker.request('task.complete', { id: 't1', projectId: 'p1', repeats: true })
+  assert.equal(answer.task?.status, 0)
+  assert.equal(answer.task?.dueDate, '2026-11-28T23:00:00.000+0000')
+  assert.equal(answer.task?.repeatFlag, 'RRULE:FREQ=DAILY;INTERVAL=1')
+  assert.equal(worker.posts.at(-1)?.event, 'task.upserted')
+  await worker.deactivate()
+})
+
+test('a task gone in TickTick is dropped from the lists and reported as conflict', async () => {
+  const api = fakeTickTick()
+  restore = api.restore
+  const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
+  await worker.request('data.load', {})
+  api.tasks.splice(0, 1)
+  await assert.rejects(worker.request('task.delete', { id: 't1', projectId: 'p1' }), (e: unknown) => (e as { code?: string }).code === 'conflict')
+  assert.deepEqual(worker.posts.at(-1), { event: 'task.removed', payload: { id: 't1' } })
+  assert.ok(!(await worker.request('data.load', {})).tasks.some((t) => t.id === 't1'))
+  await worker.deactivate()
+})
+
+test('two loads at once share one reload', async () => {
+  const api = fakeTickTick()
+  restore = api.restore
+  const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
+  await Promise.all([worker.request('data.load', { fresh: true }), worker.request('data.load', { fresh: true })])
+  assert.equal(api.calls.filter((c) => c.url === '/project').length, 1)
   await worker.deactivate()
 })

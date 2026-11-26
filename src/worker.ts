@@ -16,11 +16,12 @@ const TOKEN_KEY = 'ticktick.token'
 /** Repeated panel opens inside this window reuse the last load instead of calling TickTick. */
 const CACHE_MS = 30_000
 
-type Fail = Error & { code?: string }
+type Fail = Error & { code?: string; status?: number }
 
-function fail(code: string, message: string): Fail {
+function fail(code: string, message: string, status?: number): Fail {
   const error: Fail = new Error(message)
   error.code = code
+  if (status !== undefined) error.status = status
   return error
 }
 
@@ -60,22 +61,24 @@ async function call<T>(token: string, method: string, path: string, body?: unkno
         Authorization: `Bearer ${token}`,
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' })
       },
-      body: body === undefined ? undefined : JSON.stringify(body)
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000)
     })
   } catch (error) {
     throw fail('unavailable', `Cannot reach TickTick: ${(error as Error).message}`)
   }
   if (response.status === 401) throw fail('not_permitted', 'TickTick refused the token (401). Connect again.')
   if (response.status === 429) throw fail('rate_limited', 'TickTick allows 100 calls a minute. Wait a minute, then try again.')
+  if (response.status === 404) throw fail('conflict', 'This task or list no longer exists in TickTick.', 404)
   if (!response.ok) {
     const text = (await response.text().catch(() => '')).slice(0, 200)
-    throw fail('action_failed', `TickTick answered ${response.status}${text ? `: ${text}` : ''}`)
+    throw fail('action_failed', `TickTick answered ${response.status}${text ? `: ${text}` : ''}`, response.status)
   }
   const text = await response.text()
   return (text ? JSON.parse(text) : null) as T
 }
 
-type RawTask = Partial<TickTask> & { id: string; projectId: string; title?: string }
+type RawTask = Partial<Omit<TickTask, 'repeatFlag'>> & { id: string; projectId: string; repeatFlag?: string | null }
 
 function toTask(raw: RawTask): TickTask {
   return {
@@ -87,7 +90,8 @@ function toTask(raw: RawTask): TickTask {
     isAllDay: raw.isAllDay ?? false,
     priority: raw.priority ?? 0,
     status: raw.status ?? 0,
-    sortOrder: raw.sortOrder ?? 0
+    sortOrder: raw.sortOrder ?? 0,
+    repeatFlag: raw.repeatFlag || null
   }
 }
 
@@ -103,8 +107,8 @@ async function loadAll(token: string): Promise<TickData> {
   const pages = await Promise.all(
     ids.map((id) =>
       call<ProjectData>(token, 'GET', `/project/${id}/data`).catch((error: Fail) => {
-        // An empty Inbox can answer an error; a missing list must not hide the others.
-        if (id === 'inbox') return null
+        // Only a missing Inbox means "no Inbox tasks"; a rate limit or an outage must surface.
+        if (id === 'inbox' && error.status !== undefined && error.status >= 400 && error.status < 500 && error.status !== 429) return null
         throw error
       })
     )
@@ -118,6 +122,8 @@ async function loadAll(token: string): Promise<TickData> {
 
 export default function activate(orca: OrcaWorkerApi): void {
   let cache: TickData | null = null
+  /** Two panels opening together share one reload instead of paying for two. */
+  let loading: Promise<TickData> | null = null
 
   async function token(): Promise<string> {
     const value = await readToken(orca)
@@ -125,32 +131,48 @@ export default function activate(orca: OrcaWorkerApi): void {
     return value
   }
 
-  /** Full reload (one call per list), then tells every open panel. */
-  async function refresh(): Promise<TickData> {
-    cache = await loadAll(await token())
-    orca.panels.post('data.changed', cache)
-    return cache
+  /**
+   * Full reload (one call per list). Other panels hear a small `data.reloaded` and ask for the
+   * cached copy: a post is capped at 256 KiB and task descriptions can be long.
+   */
+  function refresh(): Promise<TickData> {
+    if (loading) return loading
+    loading = (async () => {
+      try {
+        cache = await loadAll(await token())
+        orca.panels.post('data.reloaded', { loadedAt: cache.loadedAt })
+        return cache
+      } finally {
+        loading = null
+      }
+    })()
+    return loading
   }
 
   /**
-   * After a change, edit the cached lists in place instead of reloading them: TickTick allows
-   * 100 calls a minute and a full reload costs one per list, so each tick stays one call.
+   * After a change, edit the cached lists in place instead of reloading them (TickTick allows
+   * 100 calls a minute), and tell every panel with a small event. The asking panel also applies
+   * the answer itself, so it stays right when the worker restarted with an empty cache.
    */
-  function patchCache(change: (tasks: TickTask[]) => TickTask[]): void {
-    if (!cache) return
-    cache = { ...cache, tasks: change(cache.tasks) }
-    orca.panels.post('data.changed', cache)
-  }
-
   function upsert(task: TickTask): void {
-    patchCache((tasks) => {
-      const rest = tasks.filter((t) => t.id !== task.id)
-      return task.status === 0 ? [...rest, task] : rest
-    })
+    if (task.status !== 0) return drop(task.id)
+    if (cache) cache = { ...cache, tasks: [...cache.tasks.filter((t) => t.id !== task.id), task] }
+    orca.panels.post('task.upserted', { task })
   }
 
   function drop(id: string): void {
-    patchCache((tasks) => tasks.filter((t) => t.id !== id))
+    if (cache) cache = { ...cache, tasks: cache.tasks.filter((t) => t.id !== id) }
+    orca.panels.post('task.removed', { id })
+  }
+
+  /** A task gone in TickTick (completed, moved or deleted elsewhere) leaves the lists too. */
+  async function onTask<T>(id: string, work: () => Promise<T>): Promise<T> {
+    try {
+      return await work()
+    } catch (error) {
+      if ((error as Fail).status === 404) drop(id)
+      throw error
+    }
   }
 
   orca.panels.handle('auth.status', () => status(orca))
@@ -216,24 +238,38 @@ export default function activate(orca: OrcaWorkerApi): void {
       if (patch.timeZone) body.timeZone = patch.timeZone
     }
     if (body.title === '') throw fail('invalid_params', 'A task needs a title.')
-    const task = toTask(await call<RawTask>(await token(), 'POST', `/task/${patch.id}`, body))
+    const task = await onTask(patch.id, async () =>
+      toTask(await call<RawTask>(await token(), 'POST', `/task/${patch.id}`, body))
+    )
     upsert(task)
     return { task }
   })
 
-  orca.panels.handle('task.complete', async ({ id, projectId }: TaskRef) => {
-    await call(await token(), 'POST', `/project/${projectId}/task/${id}/complete`)
-    drop(id)
-    return { ok: true as const }
+  orca.panels.handle('task.complete', async ({ id, projectId, repeats }: TaskRef & { repeats?: boolean }) => {
+    const key = await token()
+    await onTask(id, () => call(key, 'POST', `/project/${projectId}/task/${id}/complete`))
+    if (!repeats) {
+      drop(id)
+      return { task: null }
+    }
+    // A repeating task keeps its id and moves to its next date (verified live): read it back.
+    const next = toTask(await call<RawTask>(key, 'GET', `/project/${projectId}/task/${id}`))
+    upsert(next)
+    return { task: next }
   })
 
   orca.panels.handle('task.reopen', async ({ id, projectId }: TaskRef) => {
-    upsert(toTask(await call<RawTask>(await token(), 'POST', `/task/${id}`, { id, projectId, status: 0 })))
-    return { ok: true as const }
+    const task = await onTask(id, async () =>
+      toTask(await call<RawTask>(await token(), 'POST', `/task/${id}`, { id, projectId, status: 0 }))
+    )
+    if (task.status !== 0) throw fail('action_failed', 'TickTick did not reopen the task.')
+    upsert(task)
+    return { task }
   })
 
   orca.panels.handle('task.delete', async ({ id, projectId }: TaskRef) => {
-    await call(await token(), 'DELETE', `/project/${projectId}/task/${id}`)
+    const key = await token()
+    await onTask(id, () => call(key, 'DELETE', `/project/${projectId}/task/${id}`))
     drop(id)
     return { ok: true as const }
   })

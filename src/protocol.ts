@@ -15,14 +15,19 @@ declare module 'orca' {
     'task.create': { input: TaskDraft; output: { task: TickTask } }
     /** Changes title, content, due date or priority of a task. */
     'task.update': { input: TaskPatch; output: { task: TickTask } }
-    'task.complete': { input: TaskRef; output: { ok: true } }
+    /** `repeats`: read the task back, it stays open with its next date. Answers that task, else null. */
+    'task.complete': { input: TaskRef & { repeats?: boolean }; output: { task: TickTask | null } }
     /** Marks a completed task as open again. */
-    'task.reopen': { input: TaskRef; output: { ok: true } }
+    'task.reopen': { input: TaskRef; output: { task: TickTask } }
     'task.delete': { input: TaskRef; output: { ok: true } }
   }
   interface PluginPanelEvents {
-    /** Posted to every open panel after any change, so a second panel stays in step. */
-    'data.changed': TickData
+    /** After a full reload; panels fetch the cached copy with data.load (a post is capped at 256 KiB). */
+    'data.reloaded': { loadedAt: number }
+    /** A task was created, edited, reopened, or moved to its next date. */
+    'task.upserted': { task: TickTask }
+    /** A task was completed, deleted, or found gone in TickTick. */
+    'task.removed': { id: string }
     'auth.changed': AuthStatus
   }
 }
@@ -44,6 +49,8 @@ export type TickTask = {
   /** 0 open, 2 completed. */
   status: number
   sortOrder: number
+  /** Set on repeating tasks, e.g. RRULE:FREQ=DAILY;INTERVAL=1. */
+  repeatFlag: string | null
 }
 
 export type TickData = { projects: TickProject[]; tasks: TickTask[]; loadedAt: number }
