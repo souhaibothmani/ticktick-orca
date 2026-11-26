@@ -78,7 +78,12 @@ async function call<T>(token: string, method: string, path: string, body?: unkno
   return (text ? JSON.parse(text) : null) as T
 }
 
-type RawTask = Partial<Omit<TickTask, 'repeatFlag'>> & { id: string; projectId: string; repeatFlag?: string | null }
+type RawTask = Partial<Omit<TickTask, 'repeatFlag' | 'completedTime'>> & {
+  id: string
+  projectId: string
+  repeatFlag?: string | null
+  completedTime?: string | null
+}
 
 function toTask(raw: RawTask): TickTask {
   return {
@@ -91,7 +96,8 @@ function toTask(raw: RawTask): TickTask {
     priority: raw.priority ?? 0,
     status: raw.status ?? 0,
     sortOrder: raw.sortOrder ?? 0,
-    repeatFlag: raw.repeatFlag || null
+    repeatFlag: raw.repeatFlag || null,
+    completedTime: raw.completedTime || null
   }
 }
 
@@ -278,6 +284,22 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (task.status !== 0) throw fail('action_failed', 'TickTick did not reopen the task.')
     upsert(task)
     return { task }
+  })
+
+  orca.panels.handle('tasks.completed', async ({ projectId }) => {
+    const day = 24 * 60 * 60 * 1000
+    const stamp = (ms: number) => new Date(ms).toISOString().slice(0, 23) + '+0000'
+    const raw = await call<RawTask[] | null>(await token(), 'POST', '/task/completed', {
+      projectIds: [projectId],
+      startDate: stamp(Date.now() - 30 * day),
+      endDate: stamp(Date.now() + day)
+    })
+    const tasks = (raw ?? [])
+      .map(toTask)
+      .filter((t) => t.status !== 0)
+      .sort((a, b) => (b.completedTime ?? '').localeCompare(a.completedTime ?? ''))
+      .slice(0, 100)
+    return { tasks }
   })
 
   orca.panels.handle('task.delete', async ({ id, projectId }: TaskRef) => {

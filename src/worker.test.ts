@@ -47,6 +47,13 @@ function fakeTickTick(options: { inboxStatus?: number; projectStatus?: number; s
       else t.status = 2
       return new Response('', { status: 200 })
     }
+    if (method === 'POST' && url === '/task/completed') {
+      const ids = (body as { projectIds: string[] }).projectIds
+      return json([
+        { id: 'd1', projectId: ids[0], title: 'Older', status: 2, completedTime: '2026-11-01T10:00:00.000+0000' },
+        { id: 'd2', projectId: ids[0], title: 'Newer', status: 2, completedTime: '2026-11-20T10:00:00.000+0000' }
+      ])
+    }
     const one = /^\/project\/([^/]+)\/task\/([^/]+)$/.exec(url)
     if (method === 'GET' && one) {
       if (options.singleStatus) return new Response('', { status: options.singleStatus })
@@ -250,5 +257,20 @@ test('a repeating task whose read-back fails is still reported as completed', as
   const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
   assert.deepEqual(await worker.request('task.complete', { id: 't1', projectId: 'p1', repeats: true }), { task: null })
   assert.deepEqual(worker.posts.at(-1), { event: 'task.removed', payload: { id: 't1' } })
+  await worker.deactivate()
+})
+
+test('completed tasks of one list: one call, newest first, last 30 days', async () => {
+  const api = fakeTickTick()
+  restore = api.restore
+  const worker = await mountWorker(main, { host: mockHost({ storage: { 'ticktick.token': 'good' } }) })
+  const { tasks } = await worker.request('tasks.completed', { projectId: 'p1' })
+  assert.deepEqual(tasks.map((t) => t.id), ['d2', 'd1'])
+  assert.equal(tasks[0].completedTime, '2026-11-20T10:00:00.000+0000')
+  assert.equal(api.calls.length, 1)
+  const body = api.calls[0].body as { projectIds: string[]; startDate: string; endDate: string }
+  assert.deepEqual(body.projectIds, ['p1'])
+  const days = (Date.parse(body.endDate.replace('+0000', 'Z')) - Date.parse(body.startDate.replace('+0000', 'Z'))) / 86_400_000
+  assert.equal(Math.round(days), 31)
   await worker.deactivate()
 })

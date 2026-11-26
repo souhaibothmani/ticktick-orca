@@ -1,16 +1,16 @@
 # TickTick for Orca
 
-TickTick in Orca's right sidebar. Four screens, one at a time:
+TickTick in Orca's right sidebar. Three screens, one at a time, with a `←` back button:
 
-1. **Connect**: paste a TickTick Open API access token. The plugin checks it with TickTick, then
-   keeps it in the OS keychain (plugin storage when the machine has no keychain).
-2. **Lists**: Today, Next 7 Days, Inbox, then your projects, each with its open-task count.
-3. **Tasks**: tick a task to complete it (Undo appears), add a task with Enter, open a task with the arrow.
-4. **Task detail**: title, due date (Today / Tomorrow / Next week / No date), priority,
-   description, Complete, Delete (press twice). `← Back` returns to the list.
+1. **Lists**: your projects, each with its open and overdue count. Connected / Disconnect stays at the bottom.
+2. **Tasks**: the tick button asks "Complete …?" before it completes. Press a title to open the task.
+   Type in "Add task" and press Enter. **Completed** at the bottom is closed; open it to see the
+   last 30 days and press the filled tick to untick a task.
+3. **Task**: due date and priority badges, the title, and the description rendered as Markdown.
+   **Edit** opens the form (title, description, due date, priority). Complete and Delete both ask first.
 
-Today = due today or overdue. Next 7 Days = due within 7 days or overdue. A task added from
-Today or Next 7 Days goes to the Inbox, due today.
+Before those, **Connect** asks for a TickTick Open API access token, checks it with TickTick, then
+keeps it in the OS keychain (plugin storage when the machine has no keychain).
 
 ## How it works
 
@@ -20,7 +20,8 @@ Today or Next 7 Days goes to the Inbox, due today.
 - `src/protocol.ts`: the request and event types both sides share.
 
 TickTick allows **100 calls a minute**. A full load costs one call per list (projects + Inbox);
-a tick, add, edit, reopen or delete costs one call and updates the lists in place. Opening the
+a tick, add, edit, reopen or delete costs one call and updates the lists in place. Opening
+Completed costs one call. Opening the
 panel again within 30 s reuses the last load.
 
 ## Token

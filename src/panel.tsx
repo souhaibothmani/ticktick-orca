@@ -1,12 +1,12 @@
 // No build step: Orca strips the types and compiles the JSX when the panel loads.
-// Four screens, one at a time: Connect -> Lists -> Tasks -> Task detail, with a back arrow.
+// Three screens, one at a time: Lists -> Tasks -> Task, with a back button (Connect comes first).
 import {
   atom,
   Badge,
   Box,
   Button,
   Callout,
-  Checkbox,
+  Collapsible,
   derived,
   EmptyState,
   Heading,
@@ -15,6 +15,7 @@ import {
   Link,
   List,
   ListItem,
+  Markdown,
   plugin,
   read,
   Row,
@@ -26,13 +27,16 @@ import {
   Text,
   Textarea,
   update,
-  type PanelContext
+  type OrcaNode,
+  type PanelContext,
+  type Tone
 } from 'orca'
 import type { AuthStatus, TaskDraft, TaskPatch, TickData, TickTask } from './protocol'
 
 // ---------- state ----------
 
 type Nav = { screen: 'lists' } | { screen: 'tasks'; list: string } | { screen: 'task'; list: string; taskId: string }
+type Draft = { title: string; content: string; due: string; priority: string }
 
 const auth = atom<AuthStatus | null>(null)
 const data = atom<TickData | null>(null)
@@ -44,11 +48,14 @@ const busy = derived(() => read(pending) > 0)
 const error = atom<string | null>(null)
 const tokenDraft = atom('')
 const newTitle = atom('')
-/** The last task ticked, for the Undo bar. */
-const lastDone = atom<TickTask | null>(null)
-/** Detail screen edits, saved with the Save button. */
-const draft = atom<{ title: string; content: string; due: string; priority: string } | null>(null)
-/** Delete asks twice: the first press arms it. */
+/** The task whose tick waits for "Complete" or "Cancel". */
+const confirmTick = atom<string | null>(null)
+/** Completed tasks of the open list, loaded when its section opens; null = not loaded. */
+const done = atom<{ list: string; tasks: TickTask[] } | null>(null)
+const doneOpen = atom(false)
+/** Detail screen: edit form open, and its values. */
+const editing = atom(false)
+const draft = atom<Draft | null>(null)
 const deleteArmed = atom(false)
 
 // ---------- dates ----------
@@ -77,6 +84,11 @@ function parseDue(iso: string | null): Date | null {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
+function dueKey(task: TickTask): string {
+  const d = parseDue(task.dueDate)
+  return d ? dayKey(d) : ''
+}
+
 /** YYYY-MM-DD -> local midnight in TickTick's format, e.g. 2026-11-26T23:00:00+0000. */
 function toTickDate(day: string): string | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day.trim())
@@ -86,58 +98,52 @@ function toTickDate(day: string): string | null {
   return d.toISOString().slice(0, 19) + '+0000'
 }
 
-function dueLabel(task: TickTask): string | null {
+function shortDate(d: Date): string {
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+}
+
+/** "Today", "Tomorrow", "Overdue · 3 Nov" or "Mon 1 Dec", with the tone to draw it in. */
+function dueInfo(task: TickTask): { label: string; tone: Tone } | null {
   const d = parseDue(task.dueDate)
   if (!d) return null
   const today = dayKey(new Date())
   const key = dayKey(d)
-  if (key === today) return 'Today'
-  if (key === dayKey(addDays(new Date(), 1))) return 'Tomorrow'
-  if (key < today) return `Overdue · ${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
-  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+  if (key === today) return { label: 'Today', tone: 'accent' }
+  if (key === dayKey(addDays(new Date(), 1))) return { label: 'Tomorrow', tone: 'neutral' }
+  if (key < today) return { label: `Overdue · ${shortDate(d)}`, tone: 'danger' }
+  return { label: d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }), tone: 'neutral' }
 }
 
-// ---------- lists ----------
+// ---------- tasks ----------
 
-const PRIORITY: Record<number, string> = { 0: 'None', 1: 'Low', 3: 'Medium', 5: 'High' }
-
-const SMART = [
-  { id: 'today', name: 'Today', icon: 'calendar' as const },
-  { id: 'next7', name: 'Next 7 Days', icon: 'calendar' as const },
-  { id: 'inbox', name: 'Inbox', icon: 'folder' as const }
-]
-
-function isInbox(task: TickTask): boolean {
-  return task.projectId.startsWith('inbox')
+const PRIORITY: Record<number, { label: string; tone: Tone }> = {
+  1: { label: 'Low', tone: 'accent' },
+  3: { label: 'Medium', tone: 'warning' },
+  5: { label: 'High', tone: 'danger' }
 }
 
+/** Open tasks of a list: dated first by date, then the rest by priority and TickTick's order. */
 function tasksOf(list: string, all: TickTask[]): TickTask[] {
-  const today = dayKey(new Date())
-  const week = dayKey(addDays(new Date(), 6))
-  const due = (t: TickTask) => {
-    const d = parseDue(t.dueDate)
-    return d ? dayKey(d) : null
-  }
-  let picked: TickTask[]
-  if (list === 'today') picked = all.filter((t) => (due(t) ?? '9') <= today)
-  else if (list === 'next7') picked = all.filter((t) => (due(t) ?? '9') <= week)
-  else if (list === 'inbox') picked = all.filter(isInbox)
-  else picked = all.filter((t) => t.projectId === list)
-  if (list === 'today' || list === 'next7') {
-    return [...picked].sort((a, b) => (due(a) ?? '').localeCompare(due(b) ?? '') || b.priority - a.priority)
-  }
-  return [...picked].sort((a, b) => a.sortOrder - b.sortOrder)
+  return all
+    .filter((t) => t.projectId === list)
+    .sort((a, b) => {
+      const da = dueKey(a)
+      const db = dueKey(b)
+      if (da && db && da !== db) return da.localeCompare(db)
+      if (da !== db) return da ? -1 : 1
+      return b.priority - a.priority || a.sortOrder - b.sortOrder
+    })
 }
 
 function listName(list: string, d: TickData | null): string {
-  return SMART.find((s) => s.id === list)?.name ?? d?.projects.find((p) => p.id === list)?.name ?? 'Tasks'
+  return d?.projects.find((p) => p.id === list)?.name ?? 'Tasks'
 }
 
-/** New tasks from a smart list: Today/Next 7 Days get today's date, both land in the Inbox. */
-function createTarget(list: string): { projectId?: string; due?: string } {
-  if (list === 'today' || list === 'next7') return { due: dayKey(new Date()) }
-  if (list === 'inbox') return {}
-  return { projectId: list }
+/** One line under a task title: due date and priority. */
+function meta(task: TickTask): string | undefined {
+  const bits = [dueInfo(task)?.label, PRIORITY[task.priority] ? `${PRIORITY[task.priority].label} priority` : null]
+  const line = bits.filter(Boolean).join(' · ')
+  return line || undefined
 }
 
 const currentTask = derived(() => {
@@ -155,9 +161,15 @@ function message(e: unknown): string {
 /** Applies a task the worker answered or announced: in the lists if open, out if done. */
 function applyTask(task: TickTask): void {
   const d = read(data)
-  if (!d) return
-  const rest = d.tasks.filter((t) => t.id !== task.id)
-  set(data, { ...d, tasks: task.status === 0 ? [...rest, task] : rest })
+  if (d) {
+    const rest = d.tasks.filter((t) => t.id !== task.id)
+    set(data, { ...d, tasks: task.status === 0 ? [...rest, task] : rest })
+  }
+  // A reopened task leaves the Completed section.
+  const c = read(done)
+  if (c && task.status === 0 && c.tasks.some((t) => t.id === task.id)) {
+    set(done, { ...c, tasks: c.tasks.filter((t) => t.id !== task.id) })
+  }
 }
 
 function applyRemoved(id: string): void {
@@ -214,25 +226,32 @@ async function disconnect(): Promise<void> {
   if (!answer) return
   set(auth, answer)
   set(data, null)
+  set(done, null)
 }
 
-async function addTask(list: string, title: string): Promise<boolean> {
-  if (!title.trim()) return false
-  const target = createTarget(list)
-  // Orca refuses a request with an undefined field: add only the fields that have a value.
-  const input: TaskDraft = { title }
-  if (target.projectId) input.projectId = target.projectId
-  const due = target.due ? toTickDate(target.due) : null
-  if (due) Object.assign(input, { dueDate: due, isAllDay: true, timeZone: ZONE })
+function openList(list: string): void {
+  set(confirmTick, null)
+  set(done, null)
+  set(doneOpen, false)
+  set(newTitle, '')
+  set(nav, { screen: 'tasks', list })
+}
+
+async function addTask(list: string): Promise<void> {
+  const title = read(newTitle).trim()
+  if (!title) return
+  // Orca refuses a request with an undefined field: send only fields that have a value.
+  const input: TaskDraft = { title, projectId: list }
   const answer = await run(() => plugin.request('task.create', input))
-  if (answer) applyTask(answer.task)
-  return answer !== undefined
+  if (!answer) return
+  applyTask(answer.task)
+  set(newTitle, '')
 }
 
+/** The tick asks first; this runs after "Complete". */
 async function complete(task: TickTask): Promise<void> {
-  // Optimistic: the row goes away now.
+  set(confirmTick, null)
   applyRemoved(task.id)
-  set(lastDone, null)
   const ref = task.repeatFlag
     ? { id: task.id, projectId: task.projectId, repeats: true }
     : { id: task.id, projectId: task.projectId }
@@ -242,31 +261,39 @@ async function complete(task: TickTask): Promise<void> {
     if (lastCode !== 'conflict' && !read(data)?.tasks.some((t) => t.id === task.id)) applyTask(task)
     return
   }
-  // A repeating task comes back with its next date, and there is nothing to undo.
-  if (answer.task) applyTask(answer.task)
-  else if (!task.repeatFlag) set(lastDone, task)
+  // A repeating task comes back with its next date.
+  if (answer.task) {
+    applyTask(answer.task)
+    return
+  }
+  const c = read(done)
+  if (c && c.list === task.projectId) {
+    const finished = { ...task, status: 2, completedTime: new Date().toISOString() }
+    set(done, { ...c, tasks: [finished, ...c.tasks.filter((t) => t.id !== task.id)] })
+  }
 }
 
-async function undo(): Promise<void> {
-  const task = read(lastDone)
-  if (!task) return
-  set(lastDone, null)
+async function reopen(task: TickTask): Promise<void> {
   const answer = await run(() => plugin.request('task.reopen', { id: task.id, projectId: task.projectId }))
   if (answer) applyTask(answer.task)
 }
 
+async function loadDone(list: string): Promise<void> {
+  const answer = await run(() => plugin.request('tasks.completed', { projectId: list }))
+  if (answer) set(done, { list, tasks: answer.tasks })
+}
+
 function openTask(list: string, task: TickTask): void {
-  set(draft, {
-    title: task.title,
-    content: task.content,
-    due: (() => {
-      const d = parseDue(task.dueDate)
-      return d ? dayKey(d) : ''
-    })(),
-    priority: String(task.priority)
-  })
+  set(confirmTick, null)
+  set(editing, false)
   set(deleteArmed, false)
+  set(draft, null)
   set(nav, { screen: 'task', list, taskId: task.id })
+}
+
+function startEdit(task: TickTask): void {
+  set(draft, { title: task.title, content: task.content, due: dueKey(task), priority: String(task.priority) })
+  set(editing, true)
 }
 
 async function save(task: TickTask): Promise<void> {
@@ -276,8 +303,7 @@ async function save(task: TickTask): Promise<void> {
   if (d.title !== task.title) patch.title = d.title
   if (d.content !== task.content) patch.content = d.content
   if (Number(d.priority) !== task.priority) patch.priority = Number(d.priority)
-  const oldDue = parseDue(task.dueDate)
-  if (d.due !== (oldDue ? dayKey(oldDue) : '')) {
+  if (d.due !== dueKey(task)) {
     if (d.due.trim() === '') patch.dueDate = null
     else {
       const due = toTickDate(d.due)
@@ -290,23 +316,23 @@ async function save(task: TickTask): Promise<void> {
       patch.timeZone = ZONE
     }
   }
-  if (Object.keys(patch).length === 2) return
-  const answer = await run(() => plugin.request('task.update', patch))
-  if (answer) applyTask(answer.task)
+  if (Object.keys(patch).length > 2) {
+    const answer = await run(() => plugin.request('task.update', patch))
+    if (!answer) return
+    applyTask(answer.task)
+  }
+  set(editing, false)
 }
 
 async function remove(list: string, task: TickTask): Promise<void> {
-  if (!read(deleteArmed)) {
-    set(deleteArmed, true)
-    return
-  }
   const answer = await run(() => plugin.request('task.delete', { id: task.id, projectId: task.projectId }))
   if (!answer) return
   applyRemoved(task.id)
+  set(deleteArmed, false)
   set(nav, { screen: 'tasks', list })
 }
 
-function patchDraft(change: Partial<{ title: string; content: string; due: string; priority: string }>): void {
+function patchDraft(change: Partial<Draft>): void {
   const d = read(draft)
   if (d) set(draft, { ...d, ...change })
 }
@@ -314,9 +340,10 @@ function patchDraft(change: Partial<{ title: string; content: string; due: strin
 // ---------- setup ----------
 
 export function setup(ctx: PanelContext): void {
-  // The detail edits are not persisted: reopen on the task's list, not on an empty detail.
+  // Detail state is not persisted: reopen on the task's list, not on an empty detail.
   const start = read(nav)
   if (start.screen === 'task') set(nav, { screen: 'tasks', list: start.list })
+  ctx.subscriptions.push(plugin.on('auth.changed', (payload) => set(auth, payload)))
   ctx.subscriptions.push(plugin.on('task.upserted', ({ task }) => applyTask(task)))
   ctx.subscriptions.push(plugin.on('task.removed', ({ id }) => applyRemoved(id)))
   // Another panel reloaded: take the worker's cached copy (no call to TickTick).
@@ -325,7 +352,6 @@ export function setup(ctx: PanelContext): void {
       if (read(auth)?.connected && read(data)?.loadedAt !== loadedAt) void load(false, true)
     })
   )
-  ctx.subscriptions.push(plugin.on('auth.changed', (payload) => set(auth, payload)))
   void run(() => plugin.request('auth.status')).then((answer) => {
     if (!answer) return
     set(auth, answer)
@@ -333,33 +359,67 @@ export function setup(ctx: PanelContext): void {
   })
 }
 
-// ---------- screens ----------
+// ---------- pieces ----------
+
+/** Scrolling content with a footer kept at the bottom of the panel. */
+function Page({ children, footer }: { children?: OrcaNode; footer?: OrcaNode }) {
+  return (
+    <Box direction="column" height="100%" gap="md">
+      <Box grow scroll="y" gap="md">
+        {children}
+      </Box>
+      {footer ? (
+        <Box shrink={false} gap="sm">
+          <Separator />
+          {footer}
+        </Box>
+      ) : null}
+    </Box>
+  )
+}
 
 function ErrorBar() {
   const text = read(error)
   if (!text) return null
   return (
-    <Callout tone="danger" title="Something went wrong" icon="error">
-      <Stack gap="xs">
+    <Callout tone="danger" icon="error">
+      <Row justify="between" align="center" gap="sm">
         <Text size="sm">{text}</Text>
-        <Row>
-          <Button size="xs" variant="ghost" onPress={() => set(error, null)}>
-            Dismiss
-          </Button>
-        </Row>
-      </Stack>
+        <IconButton icon="close" label="Dismiss" size="xs" variant="ghost" onPress={() => set(error, null)} />
+      </Row>
     </Callout>
   )
 }
 
+function BackBar({ label, onBack, right }: { label: string; onBack: () => void; right?: OrcaNode }) {
+  return (
+    <Row justify="between" align="center">
+      <Button size="sm" variant="ghost" onPress={onBack}>
+        {`← ${label}`}
+      </Button>
+      {right ?? null}
+    </Row>
+  )
+}
+
+function RefreshButton() {
+  return (
+    <IconButton icon="refresh" label="Refresh" variant="ghost" size="sm" disabled={read(busy)} onPress={() => load(true)} />
+  )
+}
+
+// ---------- screens ----------
+
 function ConnectScreen() {
   return (
-    <Stack gap="md">
-      <Heading>Connect TickTick</Heading>
-      <Text size="sm" muted>
-        Paste a TickTick Open API access token. The plugin checks it with TickTick, then keeps it in
-        your keychain (or in Orca's plugin storage when this machine has no keychain).
-      </Text>
+    <Page>
+      <Stack gap="xs">
+        <Heading>Connect TickTick</Heading>
+        <Text size="sm" muted>
+          Paste a TickTick Open API access token. The plugin checks it with TickTick, then keeps it
+          in your keychain (or in Orca's plugin storage when this machine has no keychain).
+        </Text>
+      </Stack>
       <Input
         label="Access token"
         type="password"
@@ -374,215 +434,300 @@ function ConnectScreen() {
         </Button>
       </Row>
       <ErrorBar />
-      <Separator />
-      <Stack gap="xs">
-        <Text size="xs" weight="semibold">
-          Where do I get a token?
-        </Text>
-        <Text size="xs" muted>
-          1. Already use the TickTick MCP? Copy TICKTICK_ACCESS_TOKEN from its .env file.
-        </Text>
-        <Text size="xs" muted>
-          2. Or create an app on the TickTick developer site and run its OAuth flow once.
-        </Text>
-        <Link href="https://developer.ticktick.com/manage">developer.ticktick.com</Link>
-      </Stack>
-    </Stack>
+      <Callout tone="neutral" icon="info" title="Where do I get a token?">
+        <Stack gap="xs">
+          <Text size="xs">Already use the TickTick MCP? Copy TICKTICK_ACCESS_TOKEN from its .env file.</Text>
+          <Text size="xs">Or create an app on the TickTick developer site and run its OAuth flow once.</Text>
+          <Link href="https://developer.ticktick.com/manage">developer.ticktick.com</Link>
+        </Stack>
+      </Callout>
+    </Page>
   )
 }
 
 function ListsScreen() {
   const d = read(data)
-  const tasks = d?.tasks ?? []
-  const count = (list: string) => tasksOf(list, tasks).length
+  const total = d?.tasks.length ?? 0
   return (
-    <Stack gap="md">
+    <Page
+      footer={
+        <Row justify="between" align="center">
+          <Text size="xs" muted>
+            {read(auth)?.storedIn === 'keychain' ? 'Connected · token in keychain' : 'Connected'}
+          </Text>
+          <Button size="xs" variant="ghost" onPress={disconnect}>
+            Disconnect
+          </Button>
+        </Row>
+      }
+    >
       <Row justify="between" align="center">
-        <Heading>TickTick</Heading>
-        <IconButton icon="refresh" label="Refresh" variant="ghost" disabled={read(busy)} onPress={() => load(true)} />
+        <Stack gap="none">
+          <Heading>TickTick</Heading>
+          <Text size="xs" muted>
+            {d ? `${total} open tasks` : 'Loading…'}
+          </Text>
+        </Stack>
+        <RefreshButton />
       </Row>
       <ErrorBar />
       {!d ? (
-        <Skeleton lines={6} label="Loading lists" />
+        <Skeleton lines={5} label="Loading lists" />
+      ) : d.projects.length === 0 ? (
+        <EmptyState icon="folder" title="No lists" description="Create a list in TickTick, then refresh." />
       ) : (
-        <Stack gap="sm">
-          <List label="Smart lists">
-            {SMART.map((s) => (
-              <ListItem
-                key={s.id}
-                icon={s.icon}
-                title={s.name}
-                description={`${count(s.id)} tasks`}
-                onPress={() => set(nav, { screen: 'tasks', list: s.id })}
-              />
-            ))}
-          </List>
-          <List label="Lists">
-            {d.projects.map((p) => (
+        <List label="Lists">
+          {d.projects.map((p) => {
+            const open = tasksOf(p.id, d.tasks)
+            const overdue = open.filter((t) => dueInfo(t)?.tone === 'danger').length
+            return (
               <ListItem
                 key={p.id}
                 title={p.name}
-                description={`${count(p.id)} tasks`}
-                onPress={() => set(nav, { screen: 'tasks', list: p.id })}
+                description={`${open.length} open${overdue ? ` · ${overdue} overdue` : ''}`}
+                onPress={() => openList(p.id)}
               />
-            ))}
-          </List>
-        </Stack>
+            )
+          })}
+        </List>
       )}
-      <Separator />
-      <Row justify="between" align="center">
-        <Text size="xs" muted>
-          Connected{read(auth)?.storedIn === 'keychain' ? ' · token in keychain' : ''}
-        </Text>
-        <Button size="xs" variant="ghost" onPress={disconnect}>
-          Disconnect
-        </Button>
-      </Row>
-    </Stack>
+    </Page>
   )
 }
 
+/** An open task: tick button (asks first), then the title, which opens the task. */
 function TaskRow({ list, task }: { list: string; task: TickTask }) {
-  const due = dueLabel(task)
-  const bits = [due, task.priority ? `${PRIORITY[task.priority] ?? ''} priority` : null].filter(Boolean)
-  return (
-    <Box direction="row" gap="xs" align="center" paddingY="xs">
-      <Box grow>
-        <Checkbox
-          label={task.title}
-          description={bits.length ? bits.join(' · ') : undefined}
-          checked={false}
-          disabled={read(busy)}
-          onChange={(checked) => {
-            if (checked) void complete(task)
-          }}
-        />
+  if (read(confirmTick) === task.id) {
+    return (
+      <Box direction="row" gap="sm" align="center" justify="between" padding="sm" radius="md" background="success">
+        <Box grow minWidth={0}>
+          <Text size="sm" weight="medium" truncate>
+            {`Complete “${task.title}”?`}
+          </Text>
+        </Box>
+        <Row gap="xs">
+          <Button size="xs" variant="ghost" onPress={() => set(confirmTick, null)}>
+            Cancel
+          </Button>
+          <Button size="xs" tone="success" icon="check" disabled={read(busy)} onPress={() => complete(task)}>
+            Complete
+          </Button>
+        </Row>
       </Box>
-      <IconButton icon="next" label={`Open ${task.title}`} tooltip="Open" variant="ghost" size="sm" onPress={() => openTask(list, task)} />
+    )
+  }
+  return (
+    <Box direction="row" gap="xs" align="center">
+      <IconButton
+        icon="check"
+        label={`Complete ${task.title}`}
+        tooltip={task.repeatFlag ? 'Complete (repeats)' : 'Complete'}
+        variant="outline"
+        size="sm"
+        tone={PRIORITY[task.priority]?.tone ?? 'neutral'}
+        disabled={read(busy)}
+        onPress={() => set(confirmTick, task.id)}
+      />
+      <Box grow minWidth={0}>
+        <List label={task.title}>
+          <ListItem title={task.title} description={meta(task)} onPress={() => openTask(list, task)} />
+        </List>
+      </Box>
     </Box>
+  )
+}
+
+/** A completed task: the filled tick unticks it. */
+function DoneRow({ task }: { task: TickTask }) {
+  const at = parseDue(task.completedTime)
+  return (
+    <Box direction="row" gap="sm" align="center">
+      <IconButton
+        icon="check"
+        label={`Untick ${task.title}`}
+        tooltip="Mark as not done"
+        variant="solid"
+        tone="success"
+        size="sm"
+        disabled={read(busy)}
+        onPress={() => reopen(task)}
+      />
+      <Box grow minWidth={0}>
+        <Text size="sm" muted truncate>
+          {task.title}
+        </Text>
+        {at ? (
+          <Text size="xs" muted>
+            {`Done ${shortDate(at)}`}
+          </Text>
+        ) : null}
+      </Box>
+    </Box>
+  )
+}
+
+function CompletedSection({ list }: { list: string }) {
+  const c = read(done)
+  const loaded = c && c.list === list ? c.tasks : null
+  return (
+    <Collapsible
+      title={loaded ? `Completed · ${loaded.length}` : 'Completed'}
+      description="Last 30 days"
+      open={read(doneOpen)}
+      onChange={(open) => {
+        set(doneOpen, open)
+        if (open && !loaded) void loadDone(list)
+      }}
+    >
+      {loaded === null ? (
+        <Skeleton lines={3} label="Loading completed tasks" />
+      ) : loaded.length === 0 ? (
+        <Text size="sm" muted>
+          Nothing completed in the last 30 days.
+        </Text>
+      ) : (
+        <Stack gap="sm">
+          {loaded.map((t) => (
+            <DoneRow key={t.id} task={t} />
+          ))}
+        </Stack>
+      )}
+    </Collapsible>
   )
 }
 
 function TasksScreen({ list }: { list: string }) {
   const d = read(data)
-  const tasks = tasksOf(list, d?.tasks ?? [])
-  const done = read(lastDone)
-  if (d && !SMART.some((x) => x.id === list) && !d.projects.some((p) => p.id === list)) {
+  const back = () => set(nav, { screen: 'lists' })
+  if (d && !d.projects.some((p) => p.id === list)) {
     return (
-      <Stack gap="md">
-        <Row>
-          <Button size="sm" variant="ghost" onPress={() => set(nav, { screen: 'lists' })}>
-            ← Lists
-          </Button>
-        </Row>
+      <Page>
+        <BackBar label="Lists" onBack={back} />
         <EmptyState icon="info" title="This list no longer exists" description="It was closed or deleted in TickTick." />
-      </Stack>
+      </Page>
     )
   }
+  const tasks = tasksOf(list, d?.tasks ?? [])
   return (
-    <Stack gap="md">
-      <Row justify="between" align="center">
-        <Row gap="xs" align="center">
-          <Button size="sm" variant="ghost" onPress={() => set(nav, { screen: 'lists' })}>
-            ← Lists
-          </Button>
-          <Heading level={2}>{listName(list, d)}</Heading>
-          <Badge>{tasks.length}</Badge>
-        </Row>
-        <IconButton icon="refresh" label="Refresh" variant="ghost" disabled={read(busy)} onPress={() => load(true)} />
+    <Page>
+      <BackBar label="Lists" onBack={back} right={<RefreshButton />} />
+      <Row gap="sm" align="center">
+        <Heading>{listName(list, d)}</Heading>
+        <Badge tone="accent">{tasks.length}</Badge>
       </Row>
       <Input
         label="Add task"
         labelHidden
-        placeholder={list === 'today' || list === 'next7' ? '+ Add task to Inbox, due today' : '+ Add task'}
+        placeholder="+ Add task, press Enter"
         value={read(newTitle)}
         disabled={read(busy)}
         onChange={(v) => set(newTitle, v)}
-        onSubmit={async () => {
-          if (await addTask(list, read(newTitle))) set(newTitle, '')
-        }}
+        onSubmit={() => void addTask(list)}
       />
       <ErrorBar />
-      {done ? (
-        <Callout tone="success" icon="check">
-          <Row justify="between" align="center">
-            <Text size="sm" truncate>
-              Completed “{done.title}”
-            </Text>
-            <Row gap="xs">
-              <Button size="xs" variant="ghost" onPress={undo}>
-                Undo
-              </Button>
-              <IconButton icon="close" label="Hide" size="xs" variant="ghost" onPress={() => set(lastDone, null)} />
-            </Row>
-          </Row>
-        </Callout>
-      ) : null}
       {!d ? (
         <Skeleton lines={5} label="Loading tasks" />
       ) : tasks.length === 0 ? (
-        <EmptyState icon="check" title="Nothing here" description="Add a task above." />
+        <EmptyState icon="check" title="All done" description="No open tasks in this list." />
       ) : (
-        <Stack gap="none">
+        <Stack gap="xs">
           {tasks.map((t) => (
             <TaskRow key={t.id} list={list} task={t} />
           ))}
         </Stack>
       )}
+      <Separator />
+      <CompletedSection list={list} />
+    </Page>
+  )
+}
+
+function TaskView({ list, task }: { list: string; task: TickTask }) {
+  const due = dueInfo(task)
+  const priority = PRIORITY[task.priority]
+  return (
+    <Stack gap="md">
+      {read(confirmTick) === task.id ? (
+        <Callout tone="success" icon="check" title="Complete this task?">
+          <Row gap="xs">
+            <Button
+              size="sm"
+              tone="success"
+              icon="check"
+              disabled={read(busy)}
+              onPress={async () => {
+                await complete(task)
+                set(nav, { screen: 'tasks', list })
+              }}
+            >
+              Complete
+            </Button>
+            <Button size="sm" variant="ghost" onPress={() => set(confirmTick, null)}>
+              Cancel
+            </Button>
+          </Row>
+        </Callout>
+      ) : null}
+      {read(deleteArmed) ? (
+        <Callout tone="danger" icon="delete" title="Delete this task?">
+          <Stack gap="xs">
+            <Text size="sm">It is removed from TickTick for good.</Text>
+            <Row gap="xs">
+              <Button size="sm" tone="danger" icon="delete" disabled={read(busy)} onPress={() => remove(list, task)}>
+                Delete
+              </Button>
+              <Button size="sm" variant="ghost" onPress={() => set(deleteArmed, false)}>
+                Cancel
+              </Button>
+            </Row>
+          </Stack>
+        </Callout>
+      ) : null}
+      <Row gap="xs" wrap align="center">
+        <Button
+          size="sm"
+          variant="outline"
+          tone="success"
+          icon="check"
+          disabled={read(busy)}
+          onPress={() => set(confirmTick, task.id)}
+        >
+          Complete
+        </Button>
+        {due ? <Badge tone={due.tone}>{due.label}</Badge> : <Badge>No date</Badge>}
+        {priority ? <Badge tone={priority.tone}>{`${priority.label} priority`}</Badge> : null}
+        {task.repeatFlag ? <Badge>Repeats</Badge> : null}
+      </Row>
+      <Heading level={1}>{task.title}</Heading>
+      {task.content.trim() ? (
+        <Box padding="md" radius="md" background="muted">
+          <Markdown content={task.content} />
+        </Box>
+      ) : (
+        <Text size="sm" muted>
+          No description. Press Edit to add one.
+        </Text>
+      )}
     </Stack>
   )
 }
 
-function TaskScreen({ list }: { list: string }) {
-  const task = read(currentTask)
+function TaskEdit({ task }: { task: TickTask }) {
   const d = read(draft)
-  const back = () => set(nav, { screen: 'tasks', list })
-  if (!task || !d) {
-    return (
-      <Stack gap="md">
-        <Row gap="xs" align="center">
-          <Button size="sm" variant="ghost" onPress={back}>
-            ← Back
-          </Button>
-          <Heading level={2}>Task</Heading>
-        </Row>
-        <EmptyState icon="info" title="This task is gone" description="It was completed or deleted." />
-      </Stack>
-    )
-  }
-  const project = read(data)?.projects.find((p) => p.id === task.projectId)?.name ?? 'Inbox'
+  if (!d) return null
   const dirty =
-    d.title !== task.title ||
-    d.content !== task.content ||
-    Number(d.priority) !== task.priority ||
-    d.due !== (parseDue(task.dueDate) ? dayKey(parseDue(task.dueDate) as Date) : '')
+    d.title !== task.title || d.content !== task.content || Number(d.priority) !== task.priority || d.due !== dueKey(task)
   return (
     <Stack gap="md">
-      <Row justify="between" align="center">
-        <Row gap="xs" align="center">
-          <Button size="sm" variant="ghost" onPress={back}>
-            {`← ${listName(list, read(data))}`}
-          </Button>
-          <Text size="sm" muted truncate>
-            {project}
-          </Text>
-        </Row>
-        <Button
-          icon="check"
-          size="sm"
-          variant="outline"
-          tone="success"
-          disabled={read(busy)}
-          onPress={async () => {
-            await complete(task)
-            back()
-          }}
-        >
-          Complete
-        </Button>
-      </Row>
-      <ErrorBar />
       <Input label="Title" value={d.title} onChange={(v) => patchDraft({ title: v })} onSubmit={() => save(task)} />
+      <Textarea
+        label="Description"
+        rows={8}
+        placeholder="Write something (Markdown works)"
+        value={d.content}
+        onChange={(v) => patchDraft({ content: v })}
+        onSubmit={() => save(task)}
+      />
       <Stack gap="xs">
         <Input
           label="Due date"
@@ -617,30 +762,68 @@ function TaskScreen({ list }: { list: string }) {
         ]}
         onChange={(v) => patchDraft({ priority: v })}
       />
-      <Textarea
-        label="Description"
-        rows={6}
-        placeholder="Write something"
-        value={d.content}
-        onChange={(v) => patchDraft({ content: v })}
-        onSubmit={() => save(task)}
-      />
-      <Row justify="between" align="center">
-        <Button
-          icon="delete"
-          size="sm"
-          variant={read(deleteArmed) ? 'solid' : 'ghost'}
-          tone="danger"
-          disabled={read(busy)}
-          onPress={() => remove(list, task)}
-        >
-          {read(deleteArmed) ? 'Press again to delete' : 'Delete'}
+      <Row justify="end" gap="xs">
+        <Button variant="ghost" onPress={() => set(editing, false)}>
+          Cancel
         </Button>
         <Button icon="check" disabled={read(busy) || !dirty || !d.title.trim()} onPress={() => save(task)}>
           {read(busy) ? 'Saving…' : 'Save'}
         </Button>
       </Row>
     </Stack>
+  )
+}
+
+function TaskScreen({ list }: { list: string }) {
+  const task = read(currentTask)
+  const d = read(data)
+  const back = () => {
+    set(editing, false)
+    set(nav, { screen: 'tasks', list })
+  }
+  if (!task) {
+    return (
+      <Page>
+        <BackBar label={listName(list, d)} onBack={back} />
+        <EmptyState icon="info" title="This task is gone" description="It was completed or deleted." />
+      </Page>
+    )
+  }
+  const isEditing = read(editing)
+  return (
+    <Page
+      footer={
+        isEditing ? undefined : (
+          <Row justify="between" align="center">
+            <Text size="xs" muted truncate>
+              {listName(list, d)}
+            </Text>
+            <IconButton
+              icon="delete"
+              label="Delete"
+              size="sm"
+              variant="ghost"
+              tone="danger"
+              onPress={() => set(deleteArmed, true)}
+            />
+          </Row>
+        )
+      }
+    >
+      <BackBar
+        label={listName(list, d)}
+        onBack={back}
+        right={
+          isEditing ? null : (
+            <Button size="sm" variant="ghost" icon="edit" onPress={() => startEdit(task)}>
+              Edit
+            </Button>
+          )
+        }
+      />
+      <ErrorBar />
+      {isEditing ? <TaskEdit task={task} /> : <TaskView list={list} task={task} />}
+    </Page>
   )
 }
 

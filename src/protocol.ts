@@ -21,6 +21,8 @@ declare module 'orca' {
     /** Marks a completed task as open again. */
     'task.reopen': { input: TaskRef; output: { task: TickTask } }
     'task.delete': { input: TaskRef; output: { ok: true } }
+    /** Tasks of one list completed in the last 30 days, newest first. One call. */
+    'tasks.completed': { input: { projectId: string }; output: { tasks: TickTask[] } }
   }
   interface PluginPanelEvents {
     /** After a full reload; panels fetch the cached copy with data.load (a post is capped at 256 KiB). */
@@ -52,6 +54,8 @@ export type TickTask = {
   sortOrder: number
   /** Set on repeating tasks, e.g. RRULE:FREQ=DAILY;INTERVAL=1. */
   repeatFlag: string | null
+  /** When it was completed; null while open. */
+  completedTime: string | null
 }
 
 export type TickData = { projects: TickProject[]; tasks: TickTask[]; loadedAt: number }
