@@ -184,7 +184,8 @@ function applyTask(task: TickTask): void {
   if (dr && dr.taskId === task.id && task.status === 0) {
     const fresh = fieldsOf(task)
     const next: Draft = { ...dr, base: fresh }
-    for (const f of FIELDS) if (!touched(dr, f)) next[f] = fresh[f]
+    // Exact equality here, not `touched`: "Hello " must not snap to TickTick's trimmed "Hello".
+    for (const f of FIELDS) if (dr[f] === dr.base[f]) next[f] = fresh[f]
     set(draft, next)
   }
   const d = read(data)
@@ -236,7 +237,12 @@ async function run<T>(work: () => Promise<T>, quiet = false): Promise<T | undefi
 
 async function load(fresh = false, quiet = false): Promise<void> {
   const answer = await run(() => plugin.request('data.load', { fresh }), quiet)
-  if (answer) set(data, answer)
+  if (!answer) return
+  set(data, answer)
+  // An open task page takes what the reload brought for its untouched fields.
+  const dr = read(draft)
+  const open = dr ? answer.tasks.find((t) => t.id === dr.taskId) : undefined
+  if (open) applyTask(open)
 }
 
 async function connect(): Promise<void> {

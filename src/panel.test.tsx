@@ -506,7 +506,12 @@ test('an empty title is held back while the description still saves, and end spa
   await view.type({ label: 'Title' }, 'Hello ', { submit: true })
   assert.deepEqual(sent.at(-1), { id: 't2', projectId: 'p1', title: 'Hello ' })
   assert.ok(view.find({ text: /· Saved$/ }), 'saved, not stuck on Editing')
+  // The worker's echo to every panel brings the trimmed title back: the field keeps its space.
+  await view.post('task.upserted', { task: data.tasks.find((t) => t.id === 't2')! })
+  assert.equal(view.valueOf({ label: 'Title' }), 'Hello ')
+  await view.type({ label: 'Title' }, 'World')
+  assert.equal(view.valueOf({ label: 'Title' }), 'Hello World')
   await view.press({ text: '← 🧡Finikos' })
-  assert.equal(sent.length, 2, 'Back sends nothing more')
+  assert.deepEqual(sent.at(-1), { id: 't2', projectId: 'p1', title: 'Hello World' }, 'Back sends the rest')
   await view.unmount()
 })
