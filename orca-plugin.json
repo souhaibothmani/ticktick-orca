@@ -1,0 +1,32 @@
+{
+  "manifestVersion": 2,
+  "id": "ticktick-orca",
+  "name": "TickTick",
+  "version": "1.0.0",
+  "description": "TickTick in the Orca sidebar: see your lists, tick, add, edit and delete tasks.",
+  "engines": {
+    "orca": ">=1.4.246"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "ticktick-orca",
+        "title": "TickTick",
+        "icon": "check",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "secrets:own"
+    }
+  ]
+}
