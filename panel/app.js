@@ -43,13 +43,18 @@ function icon(name, cls) {
 
 // ---------- tiny DOM helper ----------
 
-/** h('div', { class, key, onclick, ...attrs }, ...children). `key` lets render() keep focus. */
+/**
+ * h('div', { class, key, keep, onclick, ...attrs }, ...children). `key` lets render() keep focus;
+ * `keep` (with a key) keeps the very same element across renders on the same screen, so a text
+ * field keeps its height, scroll, undo history and an IME composition while the page redraws.
+ */
 function h(tag, props, ...children) {
   const el = document.createElement(tag)
   for (const [k, v] of Object.entries(props || {})) {
     if (v === undefined || v === null || v === false) continue
     if (k === 'class') el.className = v
     else if (k === 'key') el.dataset.k = v
+    else if (k === 'keep') el.dataset.keep = ''
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v)
     else if (k === 'value') el.value = v
     else if (k === 'disabled') el.disabled = true
@@ -90,7 +95,10 @@ const S = {
   draft: null,
   saveState: 'saved',
   deleteArmed: false,
-  menu: null
+  menu: null,
+  /** What is typed in "Add task", kept across redraws; `adding` while it is being created. */
+  newTitle: '',
+  adding: false
 }
 
 function go(nav) {
@@ -184,16 +192,26 @@ function openList(list) {
   S.done = null
   S.doneOpen = false
   S.doneFailed = false
+  S.newTitle = ''
   go({ screen: 'tasks', list })
 }
 
-async function addTask(list, input) {
-  const title = input.value.trim()
-  if (!title) return
-  const answer = await run(() => request('task.create', { title, projectId: list }))
-  if (!answer) return
-  input.value = ''
-  applyTask(answer.task)
+async function addTask(list) {
+  const title = S.newTitle.trim()
+  // A second Enter while the first is on its way does nothing (the field stays usable).
+  if (!title || S.adding) return
+  S.adding = true
+  try {
+    const answer = await run(() => request('task.create', { title, projectId: list }))
+    if (!answer) return
+    // Cleared only now: a failed create keeps what was typed.
+    if (S.newTitle.trim() === title) S.newTitle = ''
+    const add = document.querySelector('[data-k="add"]')
+    if (add) add.value = S.newTitle
+    applyTask(answer.task)
+  } finally {
+    S.adding = false
+  }
 }
 
 async function complete(task) {
@@ -385,7 +403,7 @@ function connectScreen() {
       h('p', {}, 'The plugin checks the token with TickTick, then keeps it in your keychain.'),
       input,
       h('button', { class: 'btn primary', disabled: busy(), onclick: () => connect(input.value) }, busy() ? 'Connecting…' : 'Connect'),
-      h('div', { style: 'height:10px' }),
+      h('div', { class: 'gap' }),
       errorBanner(),
       h(
         'div',
@@ -402,7 +420,7 @@ function connectScreen() {
 function listsScreen() {
   const d = S.data
   const body = [
-    h('div', { class: 'bar' }, h('h1', { style: 'margin:0' }, 'TickTick'), h('div', { class: 'spacer' }), refreshButton()),
+    h('div', { class: 'bar' }, h('h1', { class: 'flat' }, 'TickTick'), h('div', { class: 'spacer' }), refreshButton()),
     errorBanner()
   ]
   if (!d) body.push(h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }))
@@ -440,7 +458,19 @@ function taskRow(list, task) {
   const due = dueLabel(dueKey(task))
   return h(
     'div',
-    { class: 'task', key: `task-${task.id}`, onclick: () => openTask(list, task) },
+    {
+      class: 'task',
+      key: `task-${task.id}`,
+      role: 'button',
+      tabindex: '0',
+      onclick: () => openTask(list, task),
+      onkeydown: (e) => {
+        if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+          e.preventDefault()
+          openTask(list, task)
+        }
+      }
+    },
     checkbox(task, () => ((S.confirmTick = task.id), render()), { title: task.repeatFlag ? 'Complete (repeats)' : 'Complete' }),
     h('div', { class: 'text' }, h('div', { class: 'title' }, task.title || 'Untitled')),
     task.content.trim() ? h('span', { class: 'note', title: 'Has a description' }, icon('note')) : null,
@@ -507,9 +537,11 @@ function tasksScreen(list) {
   const add = h('input', {
     placeholder: 'Add task, press Enter',
     key: 'add',
+    keep: true,
     'aria-label': 'Add task',
-    disabled: busy(),
-    onkeydown: (e) => e.key === 'Enter' && addTask(list, e.target)
+    value: S.newTitle,
+    oninput: (e) => (S.newTitle = e.target.value),
+    onkeydown: (e) => e.key === 'Enter' && !e.isComposing && addTask(list)
   })
   return page([
     h('div', { class: 'bar' }, backButton('Lists', () => go({ screen: 'lists' })), h('div', { class: 'spacer' }), refreshButton()),
@@ -553,6 +585,7 @@ function taskScreen(list) {
   const dateInput = h('input', {
     type: 'date',
     key: 'due',
+    keep: true,
     value: d.due,
     'aria-label': 'Due date',
     onchange: (e) => {
@@ -586,17 +619,20 @@ function taskScreen(list) {
   const title = h('textarea', {
     class: 'ttl',
     key: 'title',
+    keep: true,
     rows: 1,
     placeholder: 'Title',
     'aria-label': 'Title',
     value: d.title,
     oninput: (e) => {
+      // A title is one line: a pasted line break becomes a space.
+      if (/[\r\n]/.test(e.target.value)) e.target.value = e.target.value.replace(/[\r\n]+/g, ' ')
       autoGrow(e.target)
       patchDraft({ title: e.target.value })
     },
     onkeydown: (e) => {
       // Enter saves and moves to the description, as in TickTick.
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.isComposing) {
         e.preventDefault()
         void flush()
         document.querySelector('[data-k="desc"]')?.focus()
@@ -606,6 +642,7 @@ function taskScreen(list) {
   const desc = h('textarea', {
     class: 'desc',
     key: 'desc',
+    keep: true,
     placeholder: 'Write something',
     'aria-label': 'Description',
     value: d.content,
@@ -616,10 +653,6 @@ function taskScreen(list) {
     onkeydown: (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void flush()
     }
-  })
-  requestAnimationFrame(() => {
-    autoGrow(title)
-    autoGrow(desc)
   })
 
   const asks = []
@@ -687,7 +720,7 @@ function taskScreen(list) {
             )
           : null,
         task.repeatFlag ? h('span', { class: 'repeat', title: 'Repeats' }, icon('repeat')) : null,
-        h('div', { class: 'spacer', style: 'flex:1' }),
+        h('div', { class: 'spacer' }),
         h(
           'div',
           { class: 'anchor' },
@@ -744,12 +777,27 @@ function render() {
   const sel = key && 'selectionStart' in active ? [active.selectionStart, active.selectionEnd] : null
   const scroll = root.querySelector('[data-k="body"]')?.scrollTop ?? 0
   const where = JSON.stringify(S.nav)
-  root.replaceChildren(screen())
+  const same = where === lastScreen
+  // Fields marked `keep` survive the redraw on the same screen: the old element takes the new
+  // one's place, with the value updated only when it is not the one being typed in.
+  const kept = new Map()
+  if (same) for (const el of root.querySelectorAll('[data-keep]')) kept.set(el.dataset.k, el)
+  const next = screen()
+  for (const fresh of next.querySelectorAll('[data-keep]')) {
+    const old = kept.get(fresh.dataset.k)
+    if (!old || old.tagName !== fresh.tagName) continue
+    if (old !== active && old.value !== fresh.value) old.value = fresh.value
+    old.disabled = fresh.disabled
+    fresh.replaceWith(old)
+  }
+  root.replaceChildren(next)
+  // Grow text areas before the scroll comes back, or a short page would clip it.
+  for (const el of root.querySelectorAll('textarea')) autoGrow(el)
   const body = root.querySelector('[data-k="body"]')
   // Same screen: keep the scroll; a new screen starts at the top.
-  if (body && where === lastScreen) body.scrollTop = scroll
+  if (body && same) body.scrollTop = scroll
   lastScreen = where
-  if (key) {
+  if (key && document.activeElement !== active) {
     const again = root.querySelector(`[data-k="${CSS.escape(key)}"]`)
     if (again && !again.disabled) {
       again.focus()

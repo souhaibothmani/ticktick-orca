@@ -707,3 +707,24 @@ h1 .count {
     transform: rotate(360deg);
   }
 }
+
+.gap {
+  height: 10px;
+}
+
+h1.flat {
+  margin: 0;
+}
+
+.task:focus-visible,
+.row:focus-visible,
+.check:focus-visible,
+.icon-btn:focus-visible,
+.btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.spacer {
+  flex: 1;
+}
