@@ -1,0 +1,709 @@
+/* TickTick-like panel on Orca's theme: every colour comes from the --orca-* frame variables. */
+:root {
+  --bg: var(--orca-background, #1b1b1b);
+  --fg: var(--orca-foreground, #e8e8e8);
+  --muted: var(--orca-muted-foreground, #8b8b8b);
+  --line: var(--orca-border, #2c2c2c);
+  --hover: var(--orca-accent, #262626);
+  --soft: var(--orca-muted, #232323);
+  --primary: var(--orca-primary, #4772fa);
+  --danger: var(--orca-destructive, #e5484d);
+  --radius: var(--orca-radius, 8px);
+  --high: #e5484d;
+  --medium: #f5a524;
+  --low: #4772fa;
+  --none: color-mix(in srgb, var(--muted) 80%, transparent);
+  --done: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.45 var(--orca-font-sans, system-ui, sans-serif);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ---------- page: scrolling body, footer pinned to the bottom ---------- */
+
+#root,
+.page {
+  height: 100%;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 14px 16px;
+}
+
+.foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 40px;
+}
+
+.foot .grow {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.foot .bad {
+  color: var(--danger);
+}
+
+/* ---------- top bars ---------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  margin-bottom: 6px;
+}
+
+.bar .spacer {
+  flex: 1;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px 0 4px;
+  border-radius: 6px;
+  color: var(--muted);
+  max-width: 70%;
+}
+
+.back span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.back:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+h1 {
+  font-size: 20px;
+  font-weight: 650;
+  margin: 2px 0 10px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+h1 .count {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* ---------- lists screen ---------- */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.row:hover {
+  background: var(--hover);
+}
+
+.row .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.row .num {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.row .num.overdue {
+  color: var(--danger);
+}
+
+/* ---------- add task ---------- */
+
+.add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  margin-bottom: 8px;
+  border-radius: var(--radius);
+  background: var(--soft);
+  color: var(--muted);
+}
+
+.add input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+}
+
+.add input::placeholder {
+  color: var(--muted);
+}
+
+/* ---------- task rows ---------- */
+
+.task {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.task::after {
+  content: '';
+  position: absolute;
+  left: 32px;
+  right: 6px;
+  bottom: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.task:hover {
+  background: var(--hover);
+}
+
+.task .text {
+  flex: 1;
+  min-width: 0;
+}
+
+.task .title {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task .due {
+  flex: none;
+  font-size: 12px;
+  color: var(--muted);
+  padding-top: 1px;
+}
+
+.due.overdue {
+  color: var(--danger);
+}
+
+.due.today {
+  color: var(--primary);
+}
+
+.task .note {
+  flex: none;
+  color: var(--muted);
+  padding-top: 1px;
+}
+
+.task .note svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The checkbox: an empty rounded square coloured by priority, like TickTick. */
+.check {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border: 1.5px solid var(--none);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.check.p-low {
+  border-color: var(--low);
+  background: color-mix(in srgb, var(--low) 12%, transparent);
+}
+
+.check.p-medium {
+  border-color: var(--medium);
+  background: color-mix(in srgb, var(--medium) 12%, transparent);
+}
+
+.check.p-high {
+  border-color: var(--high);
+  background: color-mix(in srgb, var(--high) 12%, transparent);
+}
+
+.check:hover:not(:disabled) {
+  filter: brightness(1.3);
+}
+
+.check svg {
+  width: 11px;
+  height: 11px;
+  stroke-width: 3;
+  opacity: 0;
+}
+
+.check:hover:not(:disabled) svg {
+  opacity: 0.6;
+}
+
+.check.on {
+  background: var(--done);
+  border-color: transparent;
+}
+
+.check.on svg {
+  opacity: 1;
+  stroke: var(--bg);
+}
+
+.task.done .title {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+/* Inline "Complete …?" row. */
+.ask {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  margin: 2px 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.ask .q {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.btn.ghost {
+  color: var(--muted);
+}
+
+.btn.ghost:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.btn.primary {
+  background: var(--primary);
+  color: var(--orca-primary-foreground, #fff);
+}
+
+.btn.danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ---------- completed section ---------- */
+
+.section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 6px 4px;
+  font-weight: 650;
+  font-size: 13px;
+}
+
+.section svg {
+  color: var(--muted);
+  transition: transform 0.12s;
+}
+
+.section.open svg {
+  transform: rotate(90deg);
+}
+
+.section .num {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.hint {
+  color: var(--muted);
+  padding: 6px 8px;
+}
+
+.hint button {
+  color: var(--primary);
+}
+
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 28px 8px;
+}
+
+/* ---------- task page ---------- */
+
+.detail-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.detail-bar .sep {
+  width: 1px;
+  height: 16px;
+  background: var(--line);
+  margin: 0 4px;
+}
+
+.detail-bar .check {
+  margin: 0 6px 0 4px;
+  width: 18px;
+  height: 18px;
+}
+
+.chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.chip:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.chip.set {
+  color: var(--fg);
+}
+
+.chip.overdue {
+  color: var(--danger);
+}
+
+.chip.today {
+  color: var(--primary);
+}
+
+/* The native date picker sits invisibly on the chip, so a click opens it. */
+.chip input[type='date'] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+}
+
+.chip input[type='date']::-webkit-calendar-picker-indicator {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  cursor: pointer;
+}
+
+.flag.p-high {
+  color: var(--high);
+}
+
+.flag.p-medium {
+  color: var(--medium);
+}
+
+.flag.p-low {
+  color: var(--low);
+}
+
+.menu {
+  position: absolute;
+  top: 32px;
+  right: 0;
+  z-index: 10;
+  min-width: 170px;
+  padding: 4px;
+  border-radius: var(--radius);
+  background: var(--orca-popover, #252525);
+  color: var(--orca-popover-foreground, var(--fg));
+  border: 1px solid var(--line);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+}
+
+.menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 5px;
+  text-align: left;
+}
+
+.menu button:hover {
+  background: var(--hover);
+}
+
+.menu .on {
+  font-weight: 650;
+}
+
+.anchor {
+  position: relative;
+}
+
+/* Title and description: no boxes, you just type. */
+.ttl,
+.desc {
+  display: block;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  padding: 0;
+  overflow: hidden;
+}
+
+.ttl {
+  font-size: 19px;
+  font-weight: 650;
+  line-height: 1.35;
+  margin-bottom: 10px;
+}
+
+.desc {
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 200px;
+}
+
+.ttl::placeholder,
+.desc::placeholder {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.repeat {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 4px;
+}
+
+/* ---------- banners and connect ---------- */
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.banner.error {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--fg);
+}
+
+.banner.error svg {
+  color: var(--danger);
+}
+
+.banner.ask-box {
+  flex-direction: column;
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.banner.ask-box.del {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.banner .msg {
+  flex: 1;
+}
+
+.banner .actions {
+  display: flex;
+  gap: 6px;
+}
+
+.connect h1 {
+  margin-top: 8px;
+}
+
+.connect p {
+  color: var(--muted);
+  margin: 0 0 14px;
+}
+
+.field {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  margin-bottom: 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--soft);
+  color: var(--fg);
+  font: inherit;
+  outline: 0;
+}
+
+.field:focus {
+  border-color: var(--primary);
+}
+
+.connect .btn.primary {
+  height: 32px;
+  padding: 0 14px;
+}
+
+.connect .how {
+  margin-top: 22px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.connect .how b {
+  color: var(--fg);
+}
+
+.connect a {
+  color: var(--primary);
+  cursor: pointer;
+}
+
+.skeleton {
+  height: 14px;
+  margin: 12px 8px;
+  border-radius: 4px;
+  background: var(--soft);
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
