@@ -3,11 +3,12 @@
 TickTick in Orca's right sidebar. Three screens, one at a time, with a `←` back button:
 
 1. **Lists**: your projects, each with its open and overdue count. Connected / Disconnect stays at the bottom.
-2. **Tasks**: the tick button asks "Complete …?" before it completes. Press a title to open the task.
+2. **Tasks**: the empty square asks "Complete …?" before it completes. Press a title to open the task.
    Type in "Add task" and press Enter. **Completed** at the bottom is closed; open it to see the
    last 30 days and press the filled tick to untick a task.
-3. **Task**: due date and priority badges, the title, and the description rendered as Markdown.
-   **Edit** opens the form (title, description, due date, priority). Complete and Delete both ask first.
+3. **Task**: type straight into the title and the description; it saves by itself one second
+   after you stop (Enter saves at once, so does picking a date or a priority, and so does Back).
+   Complete is at the top right; Complete and Delete both ask first.
 
 Before those, **Connect** asks for a TickTick Open API access token, checks it with TickTick, then
 keeps it in the OS keychain (plugin storage when the machine has no keychain).

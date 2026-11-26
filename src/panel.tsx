@@ -15,7 +15,6 @@ import {
   Link,
   List,
   ListItem,
-  Markdown,
   plugin,
   read,
   Row,
@@ -36,7 +35,9 @@ import type { AuthStatus, TaskDraft, TaskPatch, TickData, TickTask } from './pro
 // ---------- state ----------
 
 type Nav = { screen: 'lists' } | { screen: 'tasks'; list: string } | { screen: 'task'; list: string; taskId: string }
-type Draft = { title: string; content: string; due: string; priority: string }
+/** The open task as typed. `due` is YYYY-MM-DD or ''; `customDue` shows the date field. */
+type Draft = { taskId: string; title: string; content: string; due: string; priority: string; customDue: boolean }
+type SaveState = 'saved' | 'pending' | 'saving' | 'invalid' | 'failed'
 
 const auth = atom<AuthStatus | null>(null)
 const data = atom<TickData | null>(null)
@@ -54,9 +55,9 @@ const confirmTick = atom<string | null>(null)
 const done = atom<{ list: string; tasks: TickTask[] } | null>(null)
 const doneOpen = atom(false)
 const doneFailed = atom(false)
-/** Detail screen: edit form open, and its values. */
-const editing = atom(false)
+/** Task screen: what is typed, saved by itself a moment after typing stops. */
 const draft = atom<Draft | null>(null)
+const saveState = atom<SaveState>('saved')
 const deleteArmed = atom(false)
 
 // ---------- dates ----------
@@ -289,20 +290,23 @@ async function loadDone(list: string): Promise<void> {
 
 function openTask(list: string, task: TickTask): void {
   set(confirmTick, null)
-  set(editing, false)
   set(deleteArmed, false)
-  set(draft, null)
+  set(draft, {
+    taskId: task.id,
+    title: task.title,
+    content: task.content,
+    due: dueKey(task),
+    priority: String(task.priority),
+    customDue: false
+  })
+  set(saveState, 'saved')
   set(nav, { screen: 'task', list, taskId: task.id })
 }
 
-function startEdit(task: TickTask): void {
-  set(draft, { title: task.title, content: task.content, due: dueKey(task), priority: String(task.priority) })
-  set(editing, true)
-}
-
-async function save(task: TickTask): Promise<void> {
-  const d = read(draft)
-  if (!d) return
+/** What differs between the draft and TickTick's copy; 'invalid' when it cannot be sent yet. */
+function patchOf(d: Draft, task: TickTask): TaskPatch | 'invalid' | null {
+  if (!d.title.trim()) return 'invalid'
+  // Orca refuses a request with an undefined field: add only the fields that changed.
   const patch: TaskPatch = { id: task.id, projectId: task.projectId }
   if (d.title !== task.title) patch.title = d.title
   if (d.content !== task.content) patch.content = d.content
@@ -311,21 +315,66 @@ async function save(task: TickTask): Promise<void> {
     if (d.due.trim() === '') patch.dueDate = null
     else {
       const due = toTickDate(d.due)
-      if (!due) {
-        set(error, 'Write the date as YYYY-MM-DD, for example 2026-12-01.')
-        return
-      }
+      if (!due) return 'invalid'
       patch.dueDate = due
       patch.isAllDay = true
       patch.timeZone = ZONE
     }
   }
-  if (Object.keys(patch).length > 2) {
-    const answer = await run(() => plugin.request('task.update', patch))
-    if (!answer) return
-    applyTask(answer.task)
+  return Object.keys(patch).length > 2 ? patch : null
+}
+
+let saveTimer: ReturnType<typeof setTimeout> | undefined
+let saving: Promise<void> | null = null
+/** Typed again while a save was on its way: save once more after it. */
+let saveAgain = false
+
+/** Sends what is typed now. One save at a time, so TickTick gets the edits in order. */
+async function flush(): Promise<void> {
+  clearTimeout(saveTimer)
+  if (saving) {
+    saveAgain = true
+    return saving
   }
-  set(editing, false)
+  const d = read(draft)
+  const task = d ? read(data)?.tasks.find((t) => t.id === d.taskId) : undefined
+  if (!d || !task) return
+  const patch = patchOf(d, task)
+  if (patch === 'invalid') return set(saveState, 'invalid')
+  if (patch === null) return set(saveState, 'saved')
+  set(saveState, 'saving')
+  let ok = false
+  saving = (async () => {
+    const answer = await run(() => plugin.request('task.update', patch))
+    if (answer) {
+      ok = true
+      applyTask(answer.task)
+    }
+  })()
+  try {
+    await saving
+  } finally {
+    saving = null
+  }
+  if (saveAgain) {
+    saveAgain = false
+    return flush()
+  }
+  if (!ok) return set(saveState, 'failed')
+  const now = read(draft)
+  const fresh = now ? read(data)?.tasks.find((t) => t.id === now.taskId) : undefined
+  set(saveState, now && fresh && patchOf(now, fresh) !== null ? 'pending' : 'saved')
+}
+
+/** Typing waits for a pause (one call, not one per key); a picked value saves at once. */
+function patchDraft(change: Partial<Draft>, now = false): void {
+  const d = read(draft)
+  if (!d) return
+  set(draft, { ...d, ...change })
+  set(saveState, 'pending')
+  clearTimeout(saveTimer)
+  if (now) void flush()
+  else saveTimer = setTimeout(() => void flush(), 1000)
 }
 
 async function remove(list: string, task: TickTask): Promise<void> {
@@ -334,11 +383,6 @@ async function remove(list: string, task: TickTask): Promise<void> {
   applyRemoved(task.id)
   set(deleteArmed, false)
   set(nav, { screen: 'tasks', list })
-}
-
-function patchDraft(change: Partial<Draft>): void {
-  const d = read(draft)
-  if (d) set(draft, { ...d, ...change })
 }
 
 // ---------- setup ----------
@@ -524,10 +568,10 @@ function TaskRow({ list, task }: { list: string; task: TickTask }) {
   return (
     <Box direction="row" gap="xs" align="center">
       <IconButton
-        icon="check"
+        icon="stop"
         label={`Complete ${task.title}`}
         tooltip={task.repeatFlag ? 'Complete (repeats)' : 'Complete'}
-        variant="outline"
+        variant="ghost"
         size="sm"
         tone={PRIORITY[task.priority]?.tone ?? 'neutral'}
         disabled={read(busy)}
@@ -659,11 +703,85 @@ function TasksScreen({ list }: { list: string }) {
   )
 }
 
-function TaskView({ list, task }: { list: string; task: TickTask }) {
-  const due = dueInfo(task)
-  const priority = PRIORITY[task.priority]
+const DUE_OPTIONS = ['none', 'today', 'tomorrow', 'week'] as const
+
+function quickDue(value: string): string {
+  if (value === 'today') return dayKey(new Date())
+  if (value === 'tomorrow') return dayKey(addDays(new Date(), 1))
+  if (value === 'week') return dayKey(addDays(new Date(), 7))
+  return ''
+}
+
+/** Which choice of the date menu the draft matches; anything else is "custom". */
+function dueChoice(d: Draft): string {
+  if (d.customDue) return 'custom'
+  return DUE_OPTIONS.find((o) => quickDue(o) === d.due) ?? 'custom'
+}
+
+const SAVE_TEXT: Record<SaveState, string> = {
+  saved: 'Saved',
+  pending: 'Editing…',
+  saving: 'Saving…',
+  invalid: 'Not saved: a title is needed, and dates are YYYY-MM-DD',
+  failed: 'Not saved: see the error above'
+}
+
+function TaskScreen({ list }: { list: string }) {
+  const task = read(currentTask)
+  const d = read(draft)
+  const lists = read(data)
+  const back = () => {
+    // Send what is still waiting for the typing pause, then leave.
+    void flush()
+    set(confirmTick, null)
+    set(deleteArmed, false)
+    set(nav, { screen: 'tasks', list })
+  }
+  if (!task || !d || d.taskId !== task.id) {
+    return (
+      <Page>
+        <BackBar label={listName(list, lists)} onBack={back} />
+        <EmptyState icon="info" title="This task is gone" description="It was completed or deleted." />
+      </Page>
+    )
+  }
+  const choice = dueChoice(d)
+  const state = read(saveState)
   return (
-    <Stack gap="md">
+    <Page
+      footer={
+        <Row justify="between" align="center">
+          <Text size="xs" muted truncate tone={state === 'invalid' || state === 'failed' ? 'danger' : undefined}>
+            {`${listName(list, lists)} · ${SAVE_TEXT[state]}`}
+          </Text>
+          <IconButton
+            icon="delete"
+            label="Delete"
+            size="sm"
+            variant="ghost"
+            tone="danger"
+            onPress={() => set(deleteArmed, true)}
+          />
+        </Row>
+      }
+    >
+      <BackBar
+        label={listName(list, lists)}
+        onBack={back}
+        right={
+          <Button
+            size="sm"
+            variant="outline"
+            tone="success"
+            icon="check"
+            disabled={read(busy)}
+            onPress={() => set(confirmTick, task.id)}
+          >
+            Complete
+          </Button>
+        }
+      />
+      <ErrorBar />
       {read(confirmTick) === task.id ? (
         <Callout tone="success" icon="check" title="Complete this task?">
           <Row gap="xs">
@@ -673,6 +791,7 @@ function TaskView({ list, task }: { list: string; task: TickTask }) {
               icon="check"
               disabled={read(busy)}
               onPress={async () => {
+                await flush()
                 await complete(task)
                 set(nav, { screen: 'tasks', list })
               }}
@@ -700,148 +819,67 @@ function TaskView({ list, task }: { list: string; task: TickTask }) {
           </Stack>
         </Callout>
       ) : null}
+      <Input
+        label="Title"
+        labelHidden
+        placeholder="Title"
+        value={d.title}
+        invalid={!d.title.trim()}
+        onChange={(v) => patchDraft({ title: v })}
+        onSubmit={() => void flush()}
+      />
       <Row gap="xs" wrap align="center">
-        <Button
-          size="sm"
-          variant="outline"
-          tone="success"
-          icon="check"
-          disabled={read(busy)}
-          onPress={() => set(confirmTick, task.id)}
-        >
-          Complete
-        </Button>
-        {due ? <Badge tone={due.tone}>{due.label}</Badge> : <Badge>No date</Badge>}
-        {priority ? <Badge tone={priority.tone}>{`${priority.label} priority`}</Badge> : null}
+        <Select
+          label="Due date"
+          labelHidden
+          value={choice}
+          options={[
+            { value: 'none', label: 'No date' },
+            { value: 'today', label: 'Today' },
+            { value: 'tomorrow', label: 'Tomorrow' },
+            { value: 'week', label: 'In a week' },
+            {
+              value: 'custom',
+              label: choice === 'custom' && toTickDate(d.due) ? `Due ${shortDate(parseDue(toTickDate(d.due)) as Date)}` : 'Pick a date…'
+            }
+          ]}
+          onChange={(v) =>
+            v === 'custom' ? patchDraft({ customDue: true }) : patchDraft({ due: quickDue(v), customDue: false }, true)
+          }
+        />
+        <Select
+          label="Priority"
+          labelHidden
+          value={d.priority}
+          options={[
+            { value: '0', label: 'No priority' },
+            { value: '1', label: 'Low priority' },
+            { value: '3', label: 'Medium priority' },
+            { value: '5', label: 'High priority' }
+          ]}
+          onChange={(v) => patchDraft({ priority: v }, true)}
+        />
         {task.repeatFlag ? <Badge>Repeats</Badge> : null}
       </Row>
-      <Heading level={1}>{task.title}</Heading>
-      {task.content.trim() ? (
-        <Box padding="md" radius="md" background="muted">
-          <Markdown content={task.content} />
-        </Box>
-      ) : (
-        <Text size="sm" muted>
-          No description. Press Edit to add one.
-        </Text>
-      )}
-    </Stack>
-  )
-}
-
-function TaskEdit({ task }: { task: TickTask }) {
-  const d = read(draft)
-  if (!d) return null
-  const dirty =
-    d.title !== task.title || d.content !== task.content || Number(d.priority) !== task.priority || d.due !== dueKey(task)
-  return (
-    <Stack gap="md">
-      <Input label="Title" value={d.title} onChange={(v) => patchDraft({ title: v })} onSubmit={() => save(task)} />
-      <Textarea
-        label="Description"
-        rows={8}
-        placeholder="Write something (Markdown works)"
-        value={d.content}
-        onChange={(v) => patchDraft({ content: v })}
-        onSubmit={() => save(task)}
-      />
-      <Stack gap="xs">
+      {choice === 'custom' ? (
         <Input
-          label="Due date"
+          label="Date"
           placeholder="YYYY-MM-DD"
           value={d.due}
           invalid={d.due.trim() !== '' && toTickDate(d.due) === null}
           onChange={(v) => patchDraft({ due: v })}
+          onSubmit={() => void flush()}
         />
-        <Row gap="xs" wrap>
-          <Button size="xs" variant="ghost" onPress={() => patchDraft({ due: dayKey(new Date()) })}>
-            Today
-          </Button>
-          <Button size="xs" variant="ghost" onPress={() => patchDraft({ due: dayKey(addDays(new Date(), 1)) })}>
-            Tomorrow
-          </Button>
-          <Button size="xs" variant="ghost" onPress={() => patchDraft({ due: dayKey(addDays(new Date(), 7)) })}>
-            Next week
-          </Button>
-          <Button size="xs" variant="ghost" onPress={() => patchDraft({ due: '' })}>
-            No date
-          </Button>
-        </Row>
-      </Stack>
-      <Select
-        label="Priority"
-        value={d.priority}
-        options={[
-          { value: '0', label: 'None' },
-          { value: '1', label: 'Low' },
-          { value: '3', label: 'Medium' },
-          { value: '5', label: 'High' }
-        ]}
-        onChange={(v) => patchDraft({ priority: v })}
+      ) : null}
+      <Textarea
+        label="Description"
+        labelHidden
+        rows={14}
+        placeholder="Write something"
+        value={d.content}
+        onChange={(v) => patchDraft({ content: v })}
+        onSubmit={() => void flush()}
       />
-      <Row justify="end" gap="xs">
-        <Button variant="ghost" onPress={() => set(editing, false)}>
-          Cancel
-        </Button>
-        <Button icon="check" disabled={read(busy) || !dirty || !d.title.trim()} onPress={() => save(task)}>
-          {read(busy) ? 'Saving…' : 'Save'}
-        </Button>
-      </Row>
-    </Stack>
-  )
-}
-
-function TaskScreen({ list }: { list: string }) {
-  const task = read(currentTask)
-  const d = read(data)
-  const back = () => {
-    set(editing, false)
-    set(confirmTick, null)
-    set(deleteArmed, false)
-    set(nav, { screen: 'tasks', list })
-  }
-  if (!task) {
-    return (
-      <Page>
-        <BackBar label={listName(list, d)} onBack={back} />
-        <EmptyState icon="info" title="This task is gone" description="It was completed or deleted." />
-      </Page>
-    )
-  }
-  const isEditing = read(editing)
-  return (
-    <Page
-      footer={
-        isEditing ? undefined : (
-          <Row justify="between" align="center">
-            <Text size="xs" muted truncate>
-              {listName(list, d)}
-            </Text>
-            <IconButton
-              icon="delete"
-              label="Delete"
-              size="sm"
-              variant="ghost"
-              tone="danger"
-              onPress={() => set(deleteArmed, true)}
-            />
-          </Row>
-        )
-      }
-    >
-      <BackBar
-        label={listName(list, d)}
-        onBack={back}
-        right={
-          isEditing ? null : (
-            <Button size="sm" variant="ghost" icon="edit" onPress={() => startEdit(task)}>
-              Edit
-            </Button>
-          )
-        }
-      />
-      <ErrorBar />
-      {isEditing ? <TaskEdit task={task} /> : <TaskView list={list} task={task} />}
     </Page>
   )
 }

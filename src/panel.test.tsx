@@ -94,7 +94,7 @@ test('lists show only projects, with open and overdue counts, and Disconnect sit
   await view.unmount()
 })
 
-test('pressing a title opens the task; it never ticks it', async () => {
+test('pressing a title opens the task, ready to type; it never ticks it', async () => {
   const sent: string[] = []
   const host = mockHost({
     requests: {
@@ -110,13 +110,34 @@ test('pressing a title opens the task; it never ticks it', async () => {
   await view.press({ label: '🧡Finikos' })
   await view.press({ type: 'ListItem', label: 'ISTAT' })
   assert.deepEqual(sent, [])
-  assert.ok(view.find({ type: 'Heading', text: 'ISTAT' }))
-  assert.ok(view.find({ type: 'Markdown' }), 'description shown as Markdown')
-  assert.ok(view.find({ type: 'Badge', text: 'Today' }))
-  assert.ok(view.find({ type: 'Badge', text: 'High priority' }))
+  assert.equal(view.valueOf({ label: 'Title' }), 'ISTAT')
+  assert.equal(view.valueOf({ label: 'Description' }), '## Steps\n- check the **numbers**')
+  assert.equal(view.valueOf({ label: 'Due date' }), 'today')
+  assert.equal(view.valueOf({ label: 'Priority' }), '5')
+  assert.equal(view.find({ text: 'Edit' }), null, 'no Edit button: the fields are the task')
   await view.press({ text: '← 🧡Finikos' })
   assert.ok(view.find({ label: 'Send invoice' }))
   clean(view)
+  await view.unmount()
+})
+
+test('open tasks show an empty square, completed ones a filled tick', async () => {
+  const host = mockHost({
+    requests: {
+      ...connected,
+      'data.load': () => fixture(),
+      'tasks.completed': () => ({ tasks: [task('t9', 'p1', 'Old', { status: 2, completedTime: '2026-11-20T10:00:00.000+0000' })] })
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ label: '🧡Finikos' })
+  await view.toggle({ type: 'Collapsible' })
+  const open = view.find({ label: 'Complete ISTAT' })
+  const doneTick = view.find({ label: 'Untick Old' })
+  assert.equal(open?.props.icon, 'stop')
+  assert.equal(open?.props.variant, 'ghost')
+  assert.equal(doneTick?.props.icon, 'check')
+  assert.equal(doneTick?.props.variant, 'solid')
   await view.unmount()
 })
 
@@ -197,7 +218,7 @@ test('a task completed here goes into an open Completed section', async () => {
   await view.unmount()
 })
 
-test('quick add, edit and delete (with confirmation) send the right requests', async () => {
+test('quick add, typing on the task saves by itself, and delete asks first', async () => {
   let data = fixture()
   const sent: { name: string; input: unknown }[] = []
   const host = mockHost({
@@ -230,34 +251,72 @@ test('quick add, edit and delete (with confirmation) send the right requests', a
   assert.ok(view.find({ type: 'ListItem', label: 'Call Filippo' }))
 
   await view.press({ type: 'ListItem', label: 'Send invoice' })
-  await view.press({ text: 'Edit' })
-  await view.type({ label: 'Title' }, 'Send Q4 invoice', { replace: true })
+  // Enter on the title saves at once.
+  await view.type({ label: 'Title' }, 'Send Q4 invoice', { replace: true, submit: true })
+  assert.deepEqual(sent.at(-1), { name: 'task.update', input: { id: 't2', projectId: 'p1', title: 'Send Q4 invoice' } })
+  assert.ok(view.find({ text: /Saved/ }))
+
+  // A picked priority saves at once, with what was typed before it.
   await view.type({ label: 'Description' }, 'to **Fabio**')
   await view.select({ label: 'Priority' }, '3')
-  await view.press({ text: 'No date' })
-  await view.press({ text: 'Save' })
-  assert.deepEqual(sent.at(-1), {
-    name: 'task.update',
-    input: { id: 't2', projectId: 'p1', title: 'Send Q4 invoice', content: 'to **Fabio**', priority: 3, dueDate: null }
-  })
-  assert.ok(view.find({ type: 'Heading', text: 'Send Q4 invoice' }), 'back to the view after Save')
-  assert.ok(view.find({ type: 'Badge', text: 'No date' }))
+  assert.deepEqual(sent.at(-1), { name: 'task.update', input: { id: 't2', projectId: 'p1', content: 'to **Fabio**', priority: 3 } })
 
-  // A bad date is refused in the panel, not sent.
-  await view.press({ text: 'Edit' })
+  await view.select({ label: 'Due date' }, 'none')
+  assert.deepEqual(sent.at(-1), { name: 'task.update', input: { id: 't2', projectId: 'p1', dueDate: null } })
+
+  // A date that is not a date is held back and said, not sent.
   const before = sent.length
-  await view.type({ label: 'Due date' }, '2026-13-40', { replace: true })
-  await view.press({ text: 'Save' })
+  await view.select({ label: 'Due date' }, 'custom')
+  await view.type({ label: 'Date' }, '2026-13-40', { submit: true })
   assert.equal(sent.length, before)
-  assert.ok(view.find({ text: /YYYY-MM-DD/ }))
-  await view.press({ text: 'Cancel' })
+  assert.ok(view.find({ text: /dates are YYYY-MM-DD/ }))
+  await view.type({ label: 'Date' }, '2026-12-01', { replace: true, submit: true })
+  const due = (sent.at(-1)?.input as { dueDate: string }).dueDate
+  assert.equal(due, new Date(2026, 11, 1).toISOString().slice(0, 19) + '+0000')
 
+  const kept = sent.length
   await view.press({ label: 'Delete' })
   assert.ok(view.find({ type: 'Callout', label: 'Delete this task?' }))
-  assert.equal(sent.length, before, 'nothing deleted yet')
+  assert.equal(sent.length, kept, 'nothing deleted yet')
   await view.press({ type: 'Button', text: 'Delete' })
   assert.deepEqual(sent.at(-1), { name: 'task.delete', input: { id: 't2', projectId: 'p1' } })
   assert.equal(view.find({ type: 'ListItem', label: 'Send Q4 invoice' }), null)
+  clean(view)
+  await view.unmount()
+})
+
+test('typing saves once after a pause, and Back sends what is still waiting', async () => {
+  const sent: TaskPatch[] = []
+  let data = fixture()
+  const host = mockHost({
+    requests: {
+      ...connected,
+      'data.load': () => data,
+      'task.update': (input: TaskPatch) => {
+        sent.push(input)
+        const t = data.tasks.find((x) => x.id === input.id)!
+        const next = { ...t, ...input } as TickTask
+        data = { ...data, tasks: data.tasks.map((x) => (x.id === input.id ? next : x)) }
+        return { task: next }
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  await view.press({ label: '🧡Finikos' })
+  await view.press({ type: 'ListItem', label: 'Send invoice' })
+  await view.type({ label: 'Description' }, 'a')
+  await view.type({ label: 'Description' }, 'b')
+  await view.type({ label: 'Description' }, 'c')
+  assert.equal(sent.length, 0, 'nothing while typing')
+  await new Promise((resolve) => setTimeout(resolve, 1200))
+  await view.settled()
+  assert.deepEqual(sent, [{ id: 't2', projectId: 'p1', content: 'abc' }], 'one call for the three keys')
+
+  await view.type({ label: 'Description' }, 'd')
+  await view.press({ text: '← 🧡Finikos' })
+  await view.settled()
+  assert.deepEqual(sent.at(-1), { id: 't2', projectId: 'p1', content: 'abcd' })
+  assert.equal(sent.length, 2)
   await view.unmount()
 })
 
@@ -382,6 +441,9 @@ test('Back from a task drops a pending Complete confirmation', async () => {
   await view.press({ type: 'ListItem', label: 'ISTAT' })
   await view.press({ type: 'Button', text: 'Complete' })
   assert.ok(view.find({ type: 'Callout', label: 'Complete this task?' }))
+  // The Complete button sits in the top bar, right of the back button.
+  const bar = (view.tree() as { children: { children: { children: { type: string; children?: unknown[] }[] }[] }[] }).children[0].children[0]
+  assert.equal(JSON.stringify(bar).includes('Complete'), true)
   await view.press({ text: '← 🧡Finikos' })
   assert.equal(view.find({ text: 'Complete “ISTAT”?' }), null)
   assert.ok(view.find({ type: 'ListItem', label: 'ISTAT' }))
