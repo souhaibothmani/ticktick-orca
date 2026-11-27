@@ -435,7 +435,8 @@ function listsScreen() {
           { class: 'row', key: `list-${p.id}`, onclick: () => openList(p.id) },
           h('span', { class: 'name' }, p.name),
           overdue ? h('span', { class: 'num overdue', title: `${overdue} overdue` }, String(overdue)) : null,
-          h('span', { class: 'num' }, String(open.length))
+          h('span', { class: 'num' }, String(open.length)),
+          h('span', { class: 'go', 'aria-hidden': 'true' }, icon('chevron'))
         )
       )
     }

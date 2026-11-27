@@ -176,18 +176,36 @@ h1 .count {
 /* ---------- lists screen ---------- */
 
 .row {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
-  min-height: 36px;
-  padding: 6px 8px;
-  border-radius: 6px;
+  min-height: 52px;
+  padding: 12px 10px;
+  border-radius: 8px;
   text-align: left;
+}
+
+/* A thin line between rows, inset like TickTick; it hides next to a hovered row. */
+.row + .row::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 10px;
+  right: 10px;
+  border-top: 1px solid var(--line);
 }
 
 .row:hover {
   background: var(--hover);
+}
+
+.row:hover::before,
+.row:hover + .row::before,
+.row:focus-visible::before,
+.row:focus-visible + .row::before {
+  border-top-color: transparent;
 }
 
 .row .name {
@@ -196,17 +214,29 @@ h1 .count {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
+  font-size: 16px;
+  font-weight: 500;
 }
 
 .row .num {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
 .row .num.overdue {
   color: var(--danger);
+  font-weight: 600;
+}
+
+.row .go {
+  display: flex;
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.row:hover .go {
+  opacity: 1;
 }
 
 /* ---------- add task ---------- */
